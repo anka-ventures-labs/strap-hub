@@ -95,7 +95,7 @@ def create_app(*, token: str, db_path: str | Path) -> FastAPI:
     router = APIRouter(route_class=DigestRoute)
 
     @router.post("/v1/digest")
-    def digest(payload: Digest) -> dict[str, str | dict[str, int]]:
+    def digest(payload: Digest) -> dict[str, str | None | dict[str, int]]:
         accepted = {
             "days": len(payload.days),
             "nights": len(payload.nights),

@@ -14,7 +14,7 @@ copied into the hub.
 - Auth: `Authorization: Bearer <HUB_TOKEN>`. Wrong or missing token → `401`, body ignored.
 - Reachable only inside the tailnet (`tailscale serve` in front of a `127.0.0.1` bind).
 - Body limit 2 MB → `413`. Invalid JSON or schema → `422` with a short reason.
-- Success → `200` `{"accepted": {"days": n, "nights": n, "workouts": n}, "freshness": "<iso>"}`.
+- Success → `200` `{"accepted": {"days": n, "nights": n, "workouts": n}, "freshness": "<iso>|null"}`.
 - `GET /v1/health` → `200` `{"ok": true, "last_digest_at": "<iso>|null"}`, same auth.
 
 The phone retries on network errors and `5xx` with backoff, and drops the payload
@@ -47,6 +47,9 @@ on `4xx` other than `401` (logged on the phone).
 
 Rules:
 
+- `freshness.last_band_record_at` may be `null` before the phone has stored any band
+  record. `source.device_family` is free text (`unknown` is fine). A day's `metrics`
+  may be empty.
 - `date` is the phone's **local** calendar day (`YYYY-MM-DD`), the same day label Edge uses.
   Timestamps are ISO-8601 UTC.
 - `days[].metrics` is a flat map of `metric_series` keys to numbers. Unknown keys are

@@ -25,12 +25,14 @@ live for the owner (with evidence) or explicitly declined (with the reason).
 | S0 | Write `docs/CONTRACT.md` (digest JSON v1) and hub store schema | Done: contract, `src/strap_hub/store/`, tests | — |
 | W1 | Hub ingest, store, backup importer, launchd, `tailscale serve` | Built and merged into `feat/hub-mvp`; review fixes in progress | Fix round |
 | W2 | MCP server + Hermes config | Built and merged into `feat/hub-mvp`; review fixes in progress | Fix round |
-| RV1 | Review of `feat/hub-mvp` (Sol): 5 blocking + 4 non-blocking findings; contract v1.1 written; fix round dispatched | In progress | Fix round, then targeted re-check |
+| RV1 | Review of `feat/hub-mvp` (Sol): round 1 + targeted re-check; all findings fixed | Done; PR #1 open | CI on PR #1 |
 | W3a | strap-edge: digest builder, outbox, push after sync (no UI) | In progress (Codex Sol, separate T3 thread in strap-edge, branch feat/hub-push) | Verification on hosted CI (no local Flutter) |
 | W3b | strap-edge: settings row for hub URL/token, rename and icon per TRADEMARKS.md (Opus, UI) | Planned | W3a |
 | W4 | Home Assistant publisher (mirror cloud-integration metrics; asleep helper) | Planned; dedicated HA user and token created on the hub machine (outside Git) | W1 |
 | Q1 | Identify what currently sets HA's asleep helper (outside HA) | Planned | — |
 | W5 | Hermes morning briefing via Hermes cron | Planned | W2 |
+| D1 | Contract: deleting a day metric or a whole night on the phone (no tombstone today; the hub keeps the last value) | Deferred | Real need |
+| D2 | Contract: splitting a digest that would exceed 2 MB (today a 413 is dropped by the phone; 30 days is far below the limit) | Deferred | Real need |
 
 ## Owner decisions
 

@@ -371,3 +371,17 @@ def test_push_omits_invalid_zone_data_and_keeps_workout(hub):
         assert tuple(db.execute("SELECT id, zone_min_json FROM workout").fetchone()) == (
             "synthetic-workout", None,
         )
+
+
+def test_first_push_without_band_data_is_accepted(hub):
+    client, db_path = hub
+    digest = sample_digest(125)
+    digest["freshness"] = {"last_band_record_at": None}
+    digest["source"]["device_family"] = "unknown"
+    digest["days"] = [{"date": digest["days"][0]["date"], "metrics": {}}]
+    digest["nights"] = []
+    digest["workouts"] = []
+    response = client.post("/v1/digest", headers=AUTH, json=digest)
+    assert response.status_code == 200, response.text
+    health = client.get("/v1/health", headers=AUTH)
+    assert health.status_code == 200
