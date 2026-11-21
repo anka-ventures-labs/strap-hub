@@ -31,6 +31,10 @@ foreground from the checkout, use
 
 ## Launch at login on macOS
 
+Run the service from a dedicated checkout pinned to a released commit (for example
+`~/.local/share/strap-hub/app`, `git checkout --detach <sha>`, then
+`uv sync --locked --no-dev`), not from a development checkout whose branch changes.
+
 Copy the template to `~/Library/LaunchAgents/com.anka.strap-hub.plist` and replace
 the placeholders with absolute paths. Launchd does not expand `~` in the plist.
 
@@ -57,7 +61,11 @@ Unload and bootstrap again after changing the configuration. Server logs are in
 ## Expose HTTPS inside the tailnet
 
 Keep the hub bound to loopback. With the device joined to the tailnet, run
-`tailscale serve --bg http://127.0.0.1:8770`. Follow the HTTPS setup prompt if
+`tailscale serve --bg http://127.0.0.1:8770`. If the root HTTPS port (443) already
+proxies another local service, check with `tailscale serve status` first and give the
+hub its own HTTPS port instead of replacing it:
+`tailscale serve --bg --https=8770 http://127.0.0.1:8770` (the phone then uses
+`https://<host>:8770`). Follow the HTTPS setup prompt if
 shown. Use the HTTPS base URL printed by `tailscale serve status` in the phone
 app. The phone must be on the tailnet. Use Tailscale Serve only. Never enable
 Funnel for the hub. To remove the root HTTPS proxy, run

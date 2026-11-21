@@ -112,3 +112,19 @@
 - History: `feat/hub-mvp` is squashed into one commit on top of `main` so no commit in
   the public PR carries the persona name; the old `docs/whoop-hub-plan` branch is deleted
   from GitHub. Old commit objects stay fetchable by exact SHA until GitHub purges them.
+
+## 2026-11-21: PR #1 merged and hub deployed on the hub machine
+
+- PR #1 merged by rebase at 20bc0ca after both CI checks passed on head f23d5b5.
+  All commits on `main` use the noreply author.
+- Deployed: a dedicated checkout pinned to 20bc0ca, `uv sync --locked --no-dev`, a
+  launchd agent from the template, private config and store (mode 600), loopback bind.
+  Health check works with the token, and returns 401 without it.
+- Tailscale Serve: the root HTTPS port already proxied another local service, so the
+  hub has its own tailnet HTTPS port. Funnel stays off. Verified over the tailnet.
+- Agent: registered with `hermes mcp add` (it probed the server and found 6 tools), and
+  the server was added to the profile's per-platform toolset allowlists. A fresh agent
+  session called `data_freshness` and got the correct empty-hub answer. The profile
+  config was backed up first, privately, outside Git.
+- Docs: OPERATIONS.md (pinned deploy checkout, Serve port when 443 is in use) and
+  AGENTS.md (toolset allowlist gotcha).

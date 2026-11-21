@@ -37,3 +37,13 @@ metrics, while `sleep_night` uses stored stage segments.
 **Privacy.** The tools read the local database, and Hermes sends tool results
 to whatever model the profile uses. With a hosted model, those health summaries
 go to the model provider.
+
+
+## Gotcha: per-platform toolset allowlists
+
+Hermes enables MCP servers per platform. If a profile's `platform_toolsets.<platform>`
+list already names any MCP server (for example another server added earlier), that
+list is an allowlist and a newly added server stays hidden on that platform. Add the
+server name (`whoop`) to each such list. Platforms with no saved list get every
+enabled MCP server. After `hermes mcp add`, open sessions need `/reload-mcp` or a new
+session. Verify with a one-off session that asks the agent to call `data_freshness`.
