@@ -27,8 +27,9 @@ live for the owner (with evidence) or explicitly declined (with the reason).
 | W2 | MCP server + Hermes config | Built and merged into `feat/hub-mvp`; review fixes in progress | Fix round |
 | RV1 | Review of `feat/hub-mvp` (Sol): round 1 + targeted re-check; all findings fixed | Done; PR #1 merged (20bc0ca) | — |
 | DEP1 | Deploy hub on the hub machine (launchd, tailnet HTTPS, agent MCP registration) | Live: running, reachable in the tailnet, the agent calls its tools; store still empty | P0 (real data) |
-| W3a | strap-edge: digest builder, outbox, push after sync (no UI) | In progress (Codex Sol, separate T3 thread in strap-edge, branch feat/hub-push) | Verification on hosted CI (no local Flutter) |
-| W3b | strap-edge: settings row for hub URL/token, rename and icon per TRADEMARKS.md (Opus, UI) | Planned | W3a |
+| W3a | strap-edge: digest builder, outbox, push after sync (no UI) | Built (0da9409, 02e1cd4), draft PR anka-ventures-labs/strap-edge#1; not compiled | Owner: enable Actions on the fork (web-only button), then CI |
+| W3b | strap-edge: hub settings screen, rename to Strap Edge, new icon, OpenStrap credit (Opus) | In progress (separate T3 thread, branch feat/hub-settings-rebrand on top of feat/hub-push) | — |
+| W3c | strap-edge: own bundle ID and signing with the owner's Apple developer team, device build, install on iPhone | Planned | W3a/W3b CI green; disk space or build volume for an iOS build |
 | W4 | Home Assistant publisher (mirror cloud-integration metrics; asleep helper) | Planned; dedicated HA user and token created on the hub machine (outside Git) | W1 |
 | Q1 | Identify what currently sets HA's asleep helper (outside HA) | Planned | — |
 | W5 | Hermes morning briefing via Hermes cron | Planned | W2 |
