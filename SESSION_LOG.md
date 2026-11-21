@@ -128,3 +128,21 @@
   config was backed up first, privately, outside Git.
 - Docs: OPERATIONS.md (pinned deploy checkout, Serve port when 443 is in use) and
   AGENTS.md (toolset allowlist gotcha).
+
+## 2026-11-21: strap-edge CI, first compile of the phone push
+
+- Fork Actions enabled by the owner. CI ran on draft PR anka-ventures-labs/strap-edge#1.
+- Run 1 (02e1cd4): our failures were the backup guard tests (new `hub_push_url` pref,
+  a new secure-storage owner) and one analyzer lint. Fixed in 0ed3fc5: the hub URL is
+  denylisted from backups, `lib/hub/hub_config.dart` is listed in `kSecretsNotBackedUp`,
+  and zone minutes use a null-aware map entry. All `test/hub/` tests passed.
+- Run 2 (0ed3fc5): every remaining failure already exists in upstream code at the fork
+  base (06585ef0) or on upstream main:
+  - welcome.dart lints
+  - zh/fr/hi/ru string coverage
+  - a raw InkWell in day_timeline
+  - whoop_freeze_golden gen4/gen5 (also failing on upstream main 73685c14)
+  - ui2_revision_reload: `bumpInsights()` sits 3189 characters into
+    `importEdgeBackup`, past the test's 2600-character window, identical on the base
+  Shard 2 passed.
+- The PR stays draft until W3b (settings screen and rebrand) is assembled on top.
