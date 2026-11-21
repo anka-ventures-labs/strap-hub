@@ -54,7 +54,8 @@ class Source(PayloadModel):
 
 
 class Freshness(PayloadModel):
-    last_band_record_at: Timestamp
+    # Null before the phone has stored any band record.
+    last_band_record_at: Timestamp | None
 
 
 class Day(PayloadModel):
