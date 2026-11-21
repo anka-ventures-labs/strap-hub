@@ -9,10 +9,10 @@ live for the owner (with evidence) or explicitly declined (with the reason).
 |---|---|---|---|---|
 | R1 | 2026-11-21 | Replace the expensive WHOOP 5.0 MG subscription with something open source and self-hosted | Not started (plan drafted) | P0 gate, then P1–P2 |
 | R2 | 2026-11-21 | Compare NOOP and OpenStrap, find others, pick one to start with | Done: OpenStrap Edge chosen (`docs/EVALUATION.md`) | — |
-| R3 | 2026-11-21 | Connect my Hermes agents to my WHOOP (sleep performance, workouts this week) | Not started | Step 0, W1, W2 |
+| R3 | 2026-11-21 | Connect my Hermes agents to my WHOOP (sleep performance, workouts this week) | Partly built: the agent is connected to the live hub; no WHOOP data flows yet | P0, W3a/W3b, phone install |
 | R4 | 2026-11-21 | Plug it into Home Assistant | Not started (hub HA user and token ready) | W1, W4 |
 | R5 | 2026-11-21 | Plan this out | Done: `docs/PLAN.md` | — |
-| R6 | 2026-11-21 | Connect the owner's personal assistant agent | Not started (identified: an app-managed Hermes profile) | P-1, W2 |
+| R6 | 2026-11-21 | Connect the owner's personal assistant agent | Partly built: MCP registered and verified with a tool call; empty store | Data (P0, W3) |
 | R7 | 2026-11-21 | Public repo on the anka org; keep private data out of the repo entirely | Done: repos created; history rewritten to the GitHub noreply author; privacy rule in `docs/PLAN.md`. Residual: old commit objects stay fetchable by exact SHA until GitHub purges them | — |
 | R8 | 2026-11-21 | Use whatever model the Hermes agent uses | Decided: the assistant keeps the model its profile already uses | — |
 
@@ -25,7 +25,8 @@ live for the owner (with evidence) or explicitly declined (with the reason).
 | S0 | Write `docs/CONTRACT.md` (digest JSON v1) and hub store schema | Done: contract, `src/strap_hub/store/`, tests | — |
 | W1 | Hub ingest, store, backup importer, launchd, `tailscale serve` | Built and merged into `feat/hub-mvp`; review fixes in progress | Fix round |
 | W2 | MCP server + Hermes config | Built and merged into `feat/hub-mvp`; review fixes in progress | Fix round |
-| RV1 | Review of `feat/hub-mvp` (Sol): round 1 + targeted re-check; all findings fixed | Done; PR #1 open | CI on PR #1 |
+| RV1 | Review of `feat/hub-mvp` (Sol): round 1 + targeted re-check; all findings fixed | Done; PR #1 merged (20bc0ca) | — |
+| DEP1 | Deploy hub on the hub machine (launchd, tailnet HTTPS, agent MCP registration) | Live: running, reachable in the tailnet, the agent calls its tools; store still empty | P0 (real data) |
 | W3a | strap-edge: digest builder, outbox, push after sync (no UI) | In progress (Codex Sol, separate T3 thread in strap-edge, branch feat/hub-push) | Verification on hosted CI (no local Flutter) |
 | W3b | strap-edge: settings row for hub URL/token, rename and icon per TRADEMARKS.md (Opus, UI) | Planned | W3a |
 | W4 | Home Assistant publisher (mirror cloud-integration metrics; asleep helper) | Planned; dedicated HA user and token created on the hub machine (outside Git) | W1 |
