@@ -1,0 +1,14 @@
+# Local, private, never committed
+.env
+*.env.local
+data/
+*.db
+*.db-*
+*.db.gz
+*.sqlite
+local/
+# Python
+__pycache__/
+.venv/
+*.pyc
+.pytest_cache/

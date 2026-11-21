@@ -1,0 +1,29 @@
+[project]
+name = "strap-hub"
+version = "0.1.0"
+description = "Self-hosted WHOOP hub: ingest phone digests, serve agents over MCP, feed Home Assistant"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.32",
+  "mcp>=1.2",
+]
+
+[project.scripts]
+strap-hub = "strap_hub.cli:main"
+strap-hub-mcp = "strap_hub.mcp.server:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/strap_hub"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
