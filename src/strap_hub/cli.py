@@ -1,4 +1,4 @@
-"""Command line for the hub web service, backup import and WHOOP sync."""
+"""Command line for the hub web service, backup import, WHOOP sync and queries."""
 
 import argparse
 import os
@@ -9,6 +9,7 @@ import uvicorn
 
 from strap_hub.importer import DEFAULT_MAX_BYTES, import_backup
 from strap_hub.ingest.api import create_app
+from strap_hub.mcp import query as query_commands
 from strap_hub.whoop_cloud import commands as whoop_commands
 
 DEFAULT_BIND = "127.0.0.1:8770"
@@ -34,8 +35,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     importer.add_argument(
         "--max-bytes", type=int, default=DEFAULT_MAX_BYTES, help="maximum expanded gzip bytes (default 2 GiB)"
     )
+    query_commands.register(commands)
     whoop_commands.register(commands)
     args = parser.parse_args(argv)
+    if args.command == "query":
+        query_commands.run(args)
+        return
 
     db_path = os.environ.get("HUB_DB_PATH")
     if not db_path and args.command in {"serve", "import"}:

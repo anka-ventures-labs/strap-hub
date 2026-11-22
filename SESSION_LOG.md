@@ -253,3 +253,16 @@
   `test_configured_token_directory_rejects_a_retargeted_symlink`). `uv run --locked pytest -q` → 107 passed.
 - Next: PR, CI on the exact head, merge, deploy (pinned checkout, schema v3 migration on the live
   store, launchd sync job), owner's one-time WHOOP consent.
+
+## 2026-11-22 — Shell queries for hub agents
+
+- Added `strap-hub query <tool>` and `query --list` for agents with shell access
+  on the hub. The MCP server and CLI register the same eight read-only
+  functions. CLI arguments come from the tool signatures, and the original
+  tool JSON is written to stdout. Argument errors exit 2. Tool errors produce
+  JSON on stdout and exit 1.
+- Documented use with the hub's environment file and where health results go
+  when an agent passes them to its model.
+- The locked suite passed on Python 3.14.9 (131 tests, 3.64 s) and
+  Python 3.12.14 (131 tests, 5.59 s). A separate smoke test ran the documented
+  `sleep_detail` command against a synthetic store using a fixture env file.

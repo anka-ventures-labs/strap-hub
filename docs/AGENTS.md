@@ -45,6 +45,29 @@ activity across days. MCP reads the already synced database.
 to whatever model the profile uses. With a hosted model, those health summaries
 go to the model provider.
 
+## Agents that run shell commands on the hub (no local MCP)
+
+Run `strap-hub query` on the hub with read access to the store and its private
+environment file. `uv run --env-file` loads `HUB_DB_PATH` and any optional
+`HUB_TZ` or `HUB_WHOOP_TOKEN_PATH` settings. Replace the placeholders with
+absolute paths on the hub.
+
+```sh
+cd "<hub checkout>"
+uv run --no-sync --env-file "<env file>" .venv/bin/strap-hub query sleep_detail 2026-11-21
+uv run --no-sync --env-file "<env file>" .venv/bin/strap-hub query metric_trend rmssd --days 14
+uv run --no-sync --env-file "<env file>" .venv/bin/strap-hub query workouts --from 2026-11-15 --to 2026-11-21
+.venv/bin/strap-hub query --list
+.venv/bin/strap-hub query sleep_summary --help
+```
+
+Queries call the same read-only functions as MCP and print one line of JSON
+to stdout. Tool failures return a JSON error object on stdout and exit 1.
+Invalid arguments report usage on stderr and exit 2. List and help need
+no database configuration.
+
+**Privacy.** When the agent uses shell output as model input, the health
+results go to the agent's model provider.
 
 ## Gotcha: per-platform toolset allowlists
 
