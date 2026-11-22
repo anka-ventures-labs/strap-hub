@@ -199,3 +199,8 @@
 - The focused Python 3.14 checks passed for refresh contention, interrupted
   promotion and recovery in a second process, unsafe directories and the CLI
   lifecycle. All requests used synthetic HTTP transports.
+- A complete sync now removes missing cloud rows inside the fetched window in
+  the same transaction as upserts and cursor updates. The backfill flag also
+  reconciles older records. Recovery uses the related sleep start when present.
+- Six focused Python 3.14 sync checks passed, including deletion visibility,
+  backfill of older deletions, and preservation after a second-page failure.
