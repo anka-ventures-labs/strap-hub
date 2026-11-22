@@ -15,7 +15,7 @@ live for the owner (with evidence) or explicitly declined (with the reason).
 | R6 | 2026-11-21 | Connect the owner's personal assistant agent | Partly built: MCP registered and verified with a tool call; empty store | Data (P0, W3) |
 | R7 | 2026-11-21 | Public repo on the anka org; keep private data out of the repo entirely | Done: repos created; history rewritten to the GitHub noreply author; privacy rule in `docs/PLAN.md`. Residual: old commit objects stay fetchable by exact SHA until GitHub purges them | — |
 | R8 | 2026-11-21 | Use whatever model the Hermes agent uses | Decided: the assistant keeps the model its profile already uses | — |
-| R9 | 2026-11-22 | The agent has as much control over my WHOOP as it can: mostly read, plus writes such as logging my journal each day (owner has a WHOOP developer account and will use the official app until the membership ends) | Not started; read path in W6. Journal write: official API has no write endpoints; only a private reverse-engineered API exists (terms and breakage risk), awaiting owner decision | W6; owner decision on journal |
+| R9 | 2026-11-22 | The agent has as much control over my WHOOP as it can: mostly read, plus writes such as logging my journal each day (owner has a WHOOP developer account and will use the official app until the membership ends) | Official read path implemented in W6, pending owner setup. The official API has no journal write endpoint. | W6; owner decision on journal |
 
 ## Work rows
 
@@ -31,7 +31,7 @@ live for the owner (with evidence) or explicitly declined (with the reason).
 | W3a | strap-edge: digest builder, outbox, push after sync (no UI) | Built (0da9409, 02e1cd4), draft PR anka-ventures-labs/strap-edge#1; not compiled | Owner: enable Actions on the fork (web-only button), then CI |
 | W3b | strap-edge: hub settings screen, rename to Strap Edge, new icon, OpenStrap credit (Opus) | In progress (separate T3 thread, branch feat/hub-settings-rebrand on top of feat/hub-push) | — |
 | W3c | strap-edge: own bundle ID and signing with the owner's Apple developer team, device build, install on iPhone | Planned | W3a/W3b CI green; disk space or build volume for an iOS build |
-| W6 | WHOOP cloud source: official API v2 OAuth (offline), poller, store, MCP tools for strain/steps and sleep detail (Sol) | In progress | WHOOP client ID in the owner's secret store; one-time browser consent |
+| W6 | WHOOP cloud source, official v2 OAuth and poller, SQLite storage, MCP tools for strain, steps and sleep detail | Implemented and locally verified | Register redirect, authorize once, and verify the first live sync before enabling the job |
 | W4 | Home Assistant publisher (mirror cloud-integration metrics; asleep helper) | Planned; dedicated HA user and token created on the hub machine (outside Git) | W1 |
 | Q1 | Identify what currently sets HA's asleep helper (outside HA) | Planned | — |
 | W5 | Hermes morning briefing via Hermes cron | Planned | W2 |

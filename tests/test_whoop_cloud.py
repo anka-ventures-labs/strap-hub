@@ -350,3 +350,98 @@ def test_loopback_listener_ignores_bad_state_and_accepts_valid_callback(monkeypa
     config = OAuthConfig("fixture-id", "fixture-secret")
     assert commands._loopback_code(config, authorization_url(config, "test1234"), "test1234") == "fixture-good"
     assert responses == [400, 200]
+
+
+def test_mcp_prefers_cloud_and_labels_band_fallback(cloud, collections, monkeypatch):
+    from strap_hub.mcp import server
+
+    db_path, store = cloud
+    monkeypatch.setattr(server, "_today", lambda: NOW.date())
+    with httpx.Client(transport=transport_for(collections)) as http:
+        sync_result = sync(db_path, OAuth(OAuthConfig("fixture-id", "fixture-secret"), store, http), SINCE)
+    with closing(connect(db_path)) as db, db:
+        db.executemany(
+            "INSERT INTO day_metric (date, key, value, algo_version, received_at) VALUES (?, ?, ?, 1, ?)",
+            [(day, key, value, NOW.isoformat()) for day, key, value in (
+                ("2026-01-12", "rhr", 54),
+                ("2026-01-13", "strain", 7),
+                ("2026-01-14", "strain", 8),
+                ("2026-01-14", "rhr", 64),
+                ("2026-01-14", "readiness", 65),
+                ("2026-01-14", "rmssd", 40),
+                ("2026-01-14", "steps", 9000),
+                ("2026-01-14", "tst_min", 290),
+            )],
+        )
+        db.execute(
+            """INSERT INTO sleep_segment (date, start, end, stage, algo_version) VALUES
+               ('2026-01-12', '2026-01-12T03:30:00Z', '2026-01-12T04:00:00Z', 'rem', 1)"""
+        )
+        db.executemany(
+            """INSERT INTO workout (id, date, start, type, duration_min, algo_version, received_at)
+               VALUES (?, ?, ?, 'band-session', 30, 1, ?)""",
+            [
+                ("fixture-dupe", "2026-01-13", "2026-01-13T05:00:00Z", NOW.isoformat()),
+                ("fixture-fallback", "2026-01-12", "2026-01-12T05:00:00Z", NOW.isoformat()),
+            ],
+        )
+
+    freshness = json.loads(server.data_freshness())
+    assert freshness["source"] == "whoop_cloud"
+    assert freshness["token_state"] == "ready"
+    assert freshness["cloud_last_sync_at"] == freshness["as_of"] == sync_result["last_sync_at"]
+    assert freshness["days_stored"] == 3
+
+    strain = json.loads(server.strain_day("2026-01-13"))
+    assert strain["source"] == "whoop_cloud"
+    assert strain["strain"] == 13.2 and strain["steps"] == 8100
+    assert strain["kilojoule"] == 8368 and strain["avg_hr"] == 72 and strain["max_hr"] == 160
+    pending = json.loads(server.strain_day("2026-01-14"))
+    assert pending["score_state"] == "PENDING_SCORE"
+    assert pending["strain"] == 8 and pending["steps"] == 9000
+    assert pending["band_keys"] == ["steps", "strain"]
+
+    night = json.loads(server.sleep_night("2026-01-14"))
+    assert night["source"] == "whoop_cloud"
+    assert night["segments"] == [] and night["wake_count"] is None
+    assert night["totals"]["tst_min"] == 390 and night["disturbance_count"] == 2
+    band_night = json.loads(server.sleep_night("2026-01-12"))
+    assert band_night["source"] == "band" and band_night["totals"]["rem_min"] == 30
+
+    detail = json.loads(server.sleep_detail("2026-01-14"))
+    assert detail["sleep"]["sleep_need_min"] == {"baseline": 420, "debt": 30, "recent_strain": 15, "recent_nap": -20}
+    assert detail["sleep"]["sleep_performance_percentage"] == 86
+    assert detail["sleep"]["sleep_consistency_percentage"] == 91
+    assert detail["sleep"]["sleep_efficiency_percentage"] == 94.2
+    assert detail["sleep"]["respiratory_rate"] == 14.2
+    assert detail["recovery"] == {
+        "source": "whoop_cloud", "score_state": "SCORED", "readiness": 80.4, "rmssd": 66.2,
+        "rhr": 48, "spo2_percentage": 98.1, "skin_temp_celsius": 33.2, "user_calibrating": False,
+    }
+    assert detail["naps"][0]["nap"] and detail["naps"][0]["totals"] == {}
+    band_detail = json.loads(server.sleep_detail("2026-01-12"))
+    assert band_detail["source"] == band_detail["recovery"]["source"] == "band"
+
+    summary = json.loads(server.sleep_summary(1))
+    assert summary["nights"][0]["source"] == "whoop_cloud"
+    assert summary["nights"][0]["tst_min"] == 390 and summary["nights"][0]["rmssd"] == 66.2
+    readiness = json.loads(server.readiness_today())
+    assert readiness["days"][0]["source"] == readiness["strain_yesterday_source"] == "whoop_cloud"
+    assert readiness["days"][0]["readiness"] == 80.4 and readiness["strain_yesterday"] == 13.2
+    assert json.loads(server.metric_trend("rhr", 3))["values"] == [
+        {"date": "2026-01-12", "value": 54, "source": "band"},
+        {"date": "2026-01-14", "value": 48, "source": "whoop_cloud"},
+    ]
+
+    workout_page = json.loads(server.workouts(limit=1))
+    assert workout_page["workouts"] == [{
+        "date": "2026-01-13", "type": "running", "source": "whoop_cloud", "duration_min": 45,
+        "strain": 10.8, "calories": 250, "max_hr": 158, "zone_min": {"z0": 2, "z2": 20},
+        "score_state": "SCORED", "kilojoule": 1046, "avg_hr": 120, "percent_recorded": 95,
+        "distance_meter": 4500, "altitude_gain_meter": 35, "altitude_change_meter": -5,
+    }]
+    following = json.loads(server.workouts(limit=1, cursor=workout_page["next_cursor"]))
+    assert following["workouts"][0]["source"] == "band"
+    assert following["totals"] == workout_page["totals"] == {
+        "count": 2, "duration_min": 75, "calories": 250, "zone_min": {"z0": 2, "z2": 20},
+    }
