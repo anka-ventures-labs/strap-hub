@@ -146,3 +146,16 @@
     `importEdgeBackup`, past the test's 2600-character window, identical on the base
   Shard 2 passed.
 - The PR stays draft until W3b (settings screen and rebrand) is assembled on top.
+
+## 2026-11-22: WHOOP cloud source planned
+
+- Owner will keep the official WHOOP app until the membership ends (~10 months) and wants the
+  agent to read as much WHOOP data as possible, plus journal writes if feasible.
+- Read the official developer docs: API v2 is read-only (recovery, sleep, cycles incl. steps,
+  workouts, profile, body), OAuth with `offline` refresh tokens that rotate on every refresh,
+  100 req/min and 10k/day, webhooks for sleep/workout/recovery only. No journal, behaviours,
+  ECG or blood pressure endpoints, and no write endpoints at all.
+- Likely cause of the failed Home Assistant WHOOP integration: refresh-token rotation; two
+  clients refreshing the same grant invalidate each other. The hub must be the only holder.
+- W6 dispatched to a Sol builder in its own worktree. Journal writes stay out of scope until the
+  owner decides on the private-API route.
