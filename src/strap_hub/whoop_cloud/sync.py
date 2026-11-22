@@ -152,6 +152,11 @@ def _upsert(db: sqlite3.Connection, table: str, rows: list[dict]) -> None:
     identity = "cycle_id" if table == "cloud_recovery" else "id"
     columns = tuple(rows[0])
     replacements = ", ".join(f"{key} = excluded.{key}" for key in columns if key != identity)
+    if table == "cloud_recovery":
+        replacements += (
+            ", sleep_start = CASE WHEN cloud_recovery.sleep_id = excluded.sleep_id "
+            "THEN cloud_recovery.sleep_start END"
+        )
     placeholders = ", ".join(f":{key}" for key in columns)
     db.executemany(
         f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
@@ -172,10 +177,9 @@ def _remove_missing(db: sqlite3.Connection, table: str, rows: list[dict], window
     identity = "id"
     start = "start"
     if table == "cloud_recovery":
-        # The recovery endpoint uses the related sleep's start and supplies no
-        # start of its own. A missing link cannot establish window membership.
+        # WHOOP dates recoveries by the related sleep's start.
         identity = "cycle_id"
-        start = "(SELECT start FROM cloud_sleep WHERE id = cloud_recovery.sleep_id)"
+        start = "sleep_start"
     db.execute(
         f"""DELETE FROM {table}
             WHERE {start} >= ? AND {start} < ?
@@ -235,9 +239,14 @@ def sync(db_path: str, oauth: OAuth, since: date | None = None) -> dict:
                 _set_metadata(db, OWNER, owners.pop())
             for table, rows in batches.items():
                 _upsert(db, table, rows)
-            # Reconcile recoveries while their old sleep rows are still available.
-            for table in ("cloud_recovery", "cloud_sleep", "cloud_cycle", "cloud_workout"):
-                _remove_missing(db, table, batches[table], window)
+            # Keep the start after the linked sleep disappears from a later response.
+            db.execute(
+                """UPDATE cloud_recovery SET sleep_start = cloud_sleep.start
+                   FROM cloud_sleep WHERE cloud_sleep.id = cloud_recovery.sleep_id
+                   AND cloud_recovery.sleep_start IS NOT cloud_sleep.start"""
+            )
+            for table, rows in batches.items():
+                _remove_missing(db, table, rows, window)
             _set_metadata(db, LAST_SYNC, completed_at)
             if window.advance_cursor:
                 _set_metadata(db, SYNC_END, window.end)

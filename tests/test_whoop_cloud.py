@@ -321,7 +321,7 @@ def test_failed_collection_keeps_rows_and_cursor_untouched(cloud, collections):
 
     with httpx.Client(transport=httpx.MockTransport(fail_workout_second_page)) as http:
         with pytest.raises(WhoopError, match="HTTP 403"):
-            sync(db_path, OAuth(config, store, http))
+            sync(db_path, OAuth(config, store, http), SINCE)
     with closing(connect(db_path, read_only=True)) as db:
         assert dict(db.execute("SELECT key, value FROM meta")) == previous
         assert db.execute("SELECT step_count FROM cloud_cycle WHERE id = 1").fetchone()[0] == 8100
@@ -366,6 +366,26 @@ def test_sync_removes_missing_rows_in_window_and_backfills_older_deletions(cloud
 
         sync(db_path, oauth, date(2026, 1, 5))
         assert json.loads(server.workouts("2026-01-04", "2026-01-05"))["workouts"] == []
+
+
+def test_recovery_reconciles_after_linked_sleep_disappeared_in_an_earlier_poll(cloud, collections):
+    db_path, store = cloud
+    with closing(connect(db_path)) as db, db:
+        db.execute("ALTER TABLE cloud_recovery DROP COLUMN sleep_start")
+
+    with httpx.Client(transport=transport_for(collections)) as http:
+        oauth = OAuth(OAuthConfig("fixture-id", "fixture-secret"), store, http)
+        sync(db_path, oauth, SINCE)
+        collections["/activity/sleep"].pop(0)
+        sync(db_path, oauth, SINCE)
+        with closing(connect(db_path, read_only=True)) as db:
+            assert db.execute("SELECT date FROM cloud_recovery_day").fetchone()[0] == "2026-01-13"
+            assert db.execute("SELECT sleep_start FROM cloud_recovery").fetchone()[0] == "2026-01-13T16:00:00.000000Z"
+        collections["/recovery"].clear()
+        sync(db_path, oauth, SINCE)
+
+    with closing(connect(db_path, read_only=True)) as db:
+        assert db.execute("SELECT COUNT(*) FROM cloud_recovery_day").fetchone()[0] == 0
 
 
 def test_sync_uses_previous_cutoff_through_outages(cloud, monkeypatch):
