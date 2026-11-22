@@ -240,3 +240,16 @@
 - The full locked offline suites passed on Python 3.14.9 (107 tests, 2.87 s)
   and Python 3.12.14 (107 tests, 2.96 s). All WHOOP API requests used synthetic
   transports.
+
+## 2026-11-22: W6 assembled for review
+
+- Sol built W6 (efb882b, 63a2cab). Review round 1 (fresh Sol task, the OpenCode reviewer route was
+  down on the host): no-ship, 4 blocking. Round 2 fixes (d76b370..d801046); targeted re-check: no-ship,
+  3 new blocking (empty sync after an account switch deleted data, double workout assignment, pending
+  workouts dropping band metrics) plus 2 non-blocking. Round 3 fixes (56c8626).
+- Coordinator verification of round 3: regression tests reproduce each reviewer scenario
+  (`test_empty_account_switch_requires_explicit_replace`, `test_workout_matching_assigns_each_band_session_once`,
+  `test_matched_workout_fills_missing_fields_and_zone_minutes`, `test_stale_stage_cannot_replace_the_live_pair`,
+  `test_configured_token_directory_rejects_a_retargeted_symlink`). `uv run --locked pytest -q` → 107 passed.
+- Next: PR, CI on the exact head, merge, deploy (pinned checkout, schema v3 migration on the live
+  store, launchd sync job), owner's one-time WHOOP consent.
