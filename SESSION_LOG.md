@@ -189,3 +189,13 @@
   The CLI help and LaunchAgent template also passed local checks.
 - Owner setup still needs browser consent, a first live sync and verification
   of the scheduled job, in that order.
+
+## 2026-11-22 W6 review fixes
+
+- WHOOP OAuth opens credentials relative to a validated directory descriptor.
+  It keeps the replacement token pair staged until promotion is durable, and
+  picks up a staged pair under the same lock on the next run. Local status
+  inspects the files without changing them.
+- The focused Python 3.14 checks passed for refresh contention, interrupted
+  promotion and recovery in a second process, unsafe directories and the CLI
+  lifecycle. All requests used synthetic HTTP transports.

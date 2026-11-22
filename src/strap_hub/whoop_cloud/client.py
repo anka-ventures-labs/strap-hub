@@ -93,4 +93,4 @@ class WhoopClient:
 
     def revoke(self) -> None:
         self._request("DELETE", "/user/access")
-        self.session.oauth.store.path.unlink()
+        self.session.credentials.remove()

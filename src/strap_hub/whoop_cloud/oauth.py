@@ -8,7 +8,6 @@ import math
 import os
 import secrets
 import stat
-import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
@@ -26,6 +25,8 @@ TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
 DEFAULT_REDIRECT_URI = "http://localhost:8771/whoop/callback"
 SCOPES = ("read:recovery", "read:cycles", "read:workout", "read:sleep", "read:profile",
           "read:body_measurement", "offline")
+TOKEN_SIDECARS = (".lock", ".staged", ".promote")
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
 class WhoopError(ValueError):
@@ -79,7 +80,7 @@ def token_path(db_path: str | Path | None) -> Path:
 
     if db is not None:
         store_files = {db.with_name(db.name + suffix) for suffix in ("", "-wal", "-shm", "-journal")}
-        if path in store_files or path.with_name(path.name + ".lock") in store_files:
+        if store_files.intersection(path.with_name(path.name + suffix) for suffix in ("", *TOKEN_SIDECARS)):
             raise WhoopError("WHOOP credentials must use a separate file from the hub store")
     return path
 
@@ -101,8 +102,8 @@ class Tokens:
             raise WhoopError("WHOOP token data is invalid")
 
 
-def _open_private(path: Path, flags: int) -> int:
-    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+def _open_private(directory: int, name: str, flags: int) -> int:
+    fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
         os.close(fd)
@@ -110,50 +111,119 @@ def _open_private(path: Path, flags: int) -> int:
     return fd
 
 
+def _read_tokens(directory: int, name: str) -> Tokens | None:
+    try:
+        with os.fdopen(_open_private(directory, name, os.O_RDONLY), encoding="utf-8") as stream:
+            values = json.load(stream)
+        return Tokens(values["access_token"], values["refresh_token"], values["expires_at"])
+    except FileNotFoundError:
+        return None
+    except (ValueError, TypeError, KeyError):
+        raise WhoopError("WHOOP token file is invalid or has unsafe permissions") from None
+
+
+@dataclass(frozen=True)
+class LockedTokens:
+    directory: int
+    name: str
+
+    @property
+    def staging(self) -> str:
+        return self.name + ".staged"
+
+    def load(self) -> Tokens | None:
+        staged = _read_tokens(self.directory, self.staging)
+        if staged is not None:
+            # The previous writer may have failed before syncing the staged file.
+            with os.fdopen(_open_private(self.directory, self.staging, os.O_RDONLY), "rb") as stream:
+                os.fsync(stream.fileno())
+            self._promote()
+            return staged
+        return _read_tokens(self.directory, self.name)
+
+    def _promote(self) -> None:
+        # Keep a link to the staged pair until the replacement is durable.
+        os.fsync(self.directory)
+        promotion = self.name + ".promote"
+        with suppress(FileNotFoundError):
+            os.unlink(promotion, dir_fd=self.directory)
+        os.link(self.staging, promotion, src_dir_fd=self.directory, dst_dir_fd=self.directory,
+                follow_symlinks=False)
+        os.replace(promotion, self.name, src_dir_fd=self.directory, dst_dir_fd=self.directory)
+        os.fsync(self.directory)
+        # Replacing an existing link to the same inode can be a no-op.
+        with suppress(FileNotFoundError):
+            os.unlink(promotion, dir_fd=self.directory)
+        os.unlink(self.staging, dir_fd=self.directory)
+
+    def save(self, tokens: Tokens) -> None:
+        fd = _open_private(self.directory, self.staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({
+                "access_token": tokens.access_token,
+                "refresh_token": tokens.refresh_token,
+                "expires_at": tokens.expires_at,
+            }, stream)
+            stream.flush()
+            os.fsync(fd)
+        self._promote()
+
+    def remove(self) -> None:
+        os.unlink(self.name, dir_fd=self.directory)
+        os.fsync(self.directory)
+
+
 @dataclass(frozen=True)
 class TokenStore:
     path: Path
 
     @contextmanager
-    def locked(self) -> Iterator[None]:
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        lock_path = self.path.with_name(self.path.name + ".lock")
-        with os.fdopen(_open_private(lock_path, os.O_RDWR | os.O_CREAT), "rb+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            yield
-
-    def load(self) -> Tokens | None:
+    def _directory(self, *, create: bool) -> Iterator[int]:
+        parts = Path(os.path.abspath(self.path.parent)).parts
+        uid = os.getuid()
+        directory = os.open(parts[0], DIRECTORY_FLAGS)
         try:
-            with os.fdopen(_open_private(self.path, os.O_RDONLY), encoding="utf-8") as stream:
-                values = json.load(stream)
-            return Tokens(values["access_token"], values["refresh_token"], values["expires_at"])
-        except FileNotFoundError:
-            return None
-        except (ValueError, TypeError, KeyError):
-            raise WhoopError("WHOOP token file is invalid or has unsafe permissions") from None
+            for part in parts[1:]:
+                info = os.fstat(directory)
+                # A sticky ancestor such as /tmp protects trusted owners' entries.
+                if info.st_uid not in (0, uid) or (
+                    info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX
+                ):
+                    raise WhoopError("WHOOP credential directory has an unsafe parent")
+                try:
+                    child = os.open(part, DIRECTORY_FLAGS, dir_fd=directory)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    with suppress(FileExistsError):
+                        os.mkdir(part, mode=0o700, dir_fd=directory)
+                    child = os.open(part, DIRECTORY_FLAGS, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            info = os.fstat(directory)
+            if info.st_uid != uid or info.st_mode & 0o022:
+                raise WhoopError("WHOOP credential directory must be owned by the current user and not group/world writable")
+            yield directory
+        finally:
+            os.close(directory)
 
-    def save(self, tokens: Tokens) -> None:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=self.path.parent, prefix=".whoop-", delete=False,
-        ) as stream:
-            temp_path = Path(stream.name)
-            try:
-                json.dump({
-                    "access_token": tokens.access_token,
-                    "refresh_token": tokens.refresh_token,
-                    "expires_at": tokens.expires_at,
-                }, stream)
-                stream.flush()
-                os.fsync(stream.fileno())
-                stream.close()
-                temp_path.replace(self.path)
-            finally:
-                with suppress(FileNotFoundError):
-                    temp_path.unlink()
+    @contextmanager
+    def locked(self) -> Iterator[LockedTokens]:
+        with self._directory(create=True) as directory:
+            fd = _open_private(directory, self.path.name + ".lock", os.O_RDWR | os.O_CREAT)
+            with os.fdopen(fd, "rb+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                yield LockedTokens(directory, self.path.name)
 
     def status(self) -> dict[str, str | None]:
         try:
-            tokens = self.load()
+            with self._directory(create=False) as directory:
+                # Status only inspects local files. OAuth promotes staging under the lock.
+                tokens = _read_tokens(directory, self.path.name + ".staged") or _read_tokens(
+                    directory, self.path.name,
+                )
+        except FileNotFoundError:
+            tokens = None
         except (OSError, WhoopError):
             return {"token_state": "unreadable", "token_expires_at": None}
         if tokens is None:
@@ -199,7 +269,7 @@ class OAuth:
     store: TokenStore
     http: httpx.Client
 
-    def _token_request(self, body: str) -> Tokens:
+    def _token_request(self, body: str, credentials: LockedTokens) -> Tokens:
         started_at = time.time()
         try:
             response = self.http.post(
@@ -221,7 +291,7 @@ class OAuth:
             raise WhoopError("WHOOP returned invalid token data. Authorize with the offline scope.") from None
 
         # Refresh requests are never retried. Persist both rotated values before returning.
-        self.store.save(tokens)
+        credentials.save(tokens)
         return tokens
 
     def exchange(self, code: str) -> None:
@@ -229,33 +299,40 @@ class OAuth:
         body = client.prepare_request_body(
             code=code, redirect_uri=self.config.redirect_uri, client_secret=self.config.client_secret,
         )
-        with self.store.locked():
-            self.store.load()  # Verify the destination before consuming a one-use code.
-            self._token_request(body)
+        with self.store.locked() as credentials:
+            credentials.load()  # Verify the destination before consuming a one-use code.
+            self._token_request(body, credentials)
 
     @contextmanager
     def session(self) -> Iterator[TokenSession]:
         # Hold the same lock until the caller finishes using the grant. A second
         # process reads the latest token pair after the first process releases it.
-        with self.store.locked():
-            tokens = self.store.load()
+        with self.store.locked() as credentials:
+            tokens = credentials.load()
             if tokens is None:
                 raise WhoopError("Run whoop-auth before using WHOOP")
-            yield TokenSession(self, tokens)
+            yield TokenSession(self, credentials, tokens)
 
 
 @dataclass(repr=False)
 class TokenSession:
     oauth: OAuth
+    credentials: LockedTokens
     tokens: Tokens
 
     def access_token(self, *, refresh: bool = False) -> str:
         if refresh or self.tokens.expires_at <= time.time() + 30:
+            current = self.credentials.load()
+            if current is None:
+                raise WhoopError("Run whoop-auth before using WHOOP")
+            if current != self.tokens and current.expires_at > time.time() + 30:
+                self.tokens = current
+                return current.access_token
             config = self.oauth.config
             client = WebApplicationClient(config.client_id)
             body = client.prepare_refresh_body(
-                refresh_token=self.tokens.refresh_token, scope="offline",
+                refresh_token=current.refresh_token, scope="offline",
                 client_id=config.client_id, client_secret=config.client_secret,
             )
-            self.tokens = self.oauth._token_request(body)
+            self.tokens = self.oauth._token_request(body, self.credentials)
         return self.tokens.access_token
