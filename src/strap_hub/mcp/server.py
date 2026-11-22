@@ -7,7 +7,7 @@ import os
 import sqlite3
 from base64 import b64decode, urlsafe_b64encode
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -30,6 +30,7 @@ from strap_hub.whoop_cloud.sync import last_sync
 
 mcp = MCPServer("strap-hub")
 READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+QUERY_TOOLS: dict[str, Callable[..., str]] = {}
 ISO_DATE = StringConstraints(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 SLEEP_MINUTES = ("tst_min", "deep_min", "rem_min", "light_min")
 MINUTE_KEYS = {*SLEEP_MINUTES, "nap_min", "duration_min"}
@@ -49,16 +50,31 @@ DISPLAY_KEYS = {
 WORKOUT_START = "julianday(start)"
 
 
+class HubToolError(ToolError):
+    """A tool error with a message safe to show to callers."""
+
+
+class InvalidToolArguments(HubToolError):
+    """An argument error discovered while running a tool."""
+
+
+def _query_tool[Tool: Callable[..., str]](fn: Tool) -> Tool:
+    """Register the same read-only function for MCP and the query CLI."""
+    mcp.add_tool(fn, annotations=READ_ONLY, structured_output=False)
+    QUERY_TOOLS[fn.__name__] = fn
+    return fn
+
+
 @contextmanager
 def _read_store() -> Iterator[sqlite3.Connection]:
     configured_path = os.environ.get("HUB_DB_PATH")
     if not configured_path:
-        raise ToolError("Set HUB_DB_PATH to the existing hub database")
+        raise HubToolError("Set HUB_DB_PATH to the existing hub database")
 
     try:
         connection = connect(Path(configured_path), read_only=True)
     except sqlite3.OperationalError as exc:
-        raise ToolError("Could not open the hub database read-only. Check HUB_DB_PATH and file permissions.") from exc
+        raise HubToolError("Could not open the hub database read-only. Check HUB_DB_PATH and file permissions.") from exc
 
     with closing(connection) as db:
         db.execute("BEGIN")  # Keep the data and freshness in the same snapshot.
@@ -70,7 +86,7 @@ def _today() -> date:
     try:
         zone = ZoneInfo(name) if name else None
     except (ValueError, ZoneInfoNotFoundError) as exc:
-        raise ToolError("HUB_TZ must be an installed IANA timezone name") from exc
+        raise HubToolError("HUB_TZ must be an installed IANA timezone name") from exc
     return datetime.now(zone).date()
 
 
@@ -78,7 +94,7 @@ def _parse_date(value: str) -> date:
     try:
         return date.fromisoformat(value)
     except ValueError as exc:
-        raise ToolError("Dates must be valid calendar dates in YYYY-MM-DD format") from exc
+        raise InvalidToolArguments("Dates must be valid calendar dates in YYYY-MM-DD format") from exc
 
 
 def _latest_log_time(
@@ -123,7 +139,7 @@ def _metrics(values: Mapping[str, float]) -> dict[str, int | float]:
     return {key: _metric_number(key, value) for key, value in values.items()}
 
 
-@mcp.tool(annotations=READ_ONLY, structured_output=False)
+@_query_tool
 def data_freshness() -> str:
     """Check band freshness, the last WHOOP sync, credential state and stored dates."""
     with _read_store() as db:
@@ -162,7 +178,7 @@ def _sleep_averages(nights: dict[str, dict[str, float]]) -> dict[str, float]:
     return {key: fmean(values) for key, values in samples.items()}
 
 
-@mcp.tool(annotations=READ_ONLY, structured_output=False)
+@_query_tool
 def sleep_summary(
     days: Annotated[int, Field(ge=1, le=90, strict=True, description="Calendar days ending today")] = 7,
 ) -> str:
@@ -257,7 +273,7 @@ def _sleep_provenance(band_keys: Iterable[str], cloud_keys: Iterable[str], *, ha
     return _metric_provenance(origins, default="whoop_cloud" if has_cloud_record else "band")
 
 
-@mcp.tool(annotations=READ_ONLY, structured_output=False)
+@_query_tool
 def sleep_night(date: Annotated[str, ISO_DATE, Field(description="Date the source attributes the night to")]) -> str:
     """Inspect one night's stage totals and any recorded stage timeline or disturbances."""
     day = _parse_date(date).isoformat()
@@ -297,10 +313,10 @@ def _decode_workout_cursor(cursor: str) -> tuple[float, str]:
             return float(parts[0]), parts[1]
     except (ValueError, RecursionError):
         pass
-    raise ToolError("Invalid workout cursor")
+    raise InvalidToolArguments("Invalid workout cursor")
 
 
-@mcp.tool(annotations=READ_ONLY, structured_output=False)
+@_query_tool
 def workouts(
     from_date: Annotated[
         Annotated[str, ISO_DATE] | None,
@@ -323,7 +339,7 @@ def workouts(
     start = _parse_date(from_date) if from_date is not None else today - timedelta(days=today.weekday())
     end = _parse_date(to) if to is not None else today
     if start > end:
-        raise ToolError("Workout 'from' must be on or before 'to'")
+        raise InvalidToolArguments("Workout 'from' must be on or before 'to'")
 
     bounds = (start.isoformat(), end.isoformat())
     after = _decode_workout_cursor(cursor) if cursor is not None else ()
@@ -383,7 +399,7 @@ def workouts(
         return _result(db, source=source or "band", **result)
 
 
-@mcp.tool(annotations=READ_ONLY, structured_output=False)
+@_query_tool
 def readiness_today() -> str:
     """Get today's readiness, HRV and resting heart rate, or the latest available day.
 
@@ -434,7 +450,7 @@ def readiness_today() -> str:
         )
 
 
-@mcp.tool(annotations=READ_ONLY, structured_output=False)
+@_query_tool
 def metric_trend(
     key: Annotated[str, Field(description="Stored metric key, for example rmssd, rhr or strain")],
     days: Annotated[int, Field(ge=1, le=365, strict=True, description="Calendar days ending today")] = 30,
@@ -469,7 +485,7 @@ def metric_trend(
         )
 
 
-@mcp.tool(annotations=READ_ONLY, structured_output=False)
+@_query_tool
 def strain_day(date: Annotated[str, ISO_DATE, Field(description="Local date of the activity cycle")]) -> str:
     """Get day strain, energy in kilojoules, heart rates and steps where recorded."""
     day = _parse_date(date).isoformat()
@@ -540,7 +556,7 @@ def _recovery_detail(row: sqlite3.Row | None, band: Mapping[str, float]) -> dict
     }
 
 
-@mcp.tool(annotations=READ_ONLY, structured_output=False)
+@_query_tool
 def sleep_detail(date: Annotated[str, ISO_DATE, Field(description="Local wake date")]) -> str:
     """Get sleep stages, sleep need, performance, respiratory rate, naps and recovery."""
     day = _parse_date(date).isoformat()

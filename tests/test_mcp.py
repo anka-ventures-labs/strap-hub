@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from mcp import Client
 
+from strap_hub.cli import main
 from strap_hub.mcp import server
 from strap_hub.store import connect
 
@@ -422,12 +423,16 @@ def test_database_path_with_uri_characters_never_creates_a_database(tmp_path, mo
     assert not (tmp_path / "hub").exists()
 
 
-def test_sdk_lists_exact_tool_names_and_input_schemas():
+def list_mcp_tools():
     async def list_tools():
         async with Client(server.mcp, mode="legacy") as client:
             return (await client.list_tools()).tools
 
-    tools = asyncio.run(list_tools())
+    return asyncio.run(list_tools())
+
+
+def test_sdk_lists_exact_tool_names_and_input_schemas():
+    tools = list_mcp_tools()
     assert {tool.name for tool in tools} == set(EXAMPLE_CALLS)
     assert len(tools) == len(EXAMPLE_CALLS)
     assert all(tool.description and tool.annotations.read_only_hint for tool in tools)
@@ -454,6 +459,106 @@ def test_sdk_lists_exact_tool_names_and_input_schemas():
         assert {arm["type"] for arm in field["anyOf"]} == {"string", "null"}
     limit = schemas["workouts"]["properties"]["limit"]
     assert (limit["type"], limit["minimum"], limit["maximum"], limit["default"]) == ("integer", 1, 100, 50)
+
+
+@pytest.mark.parametrize(
+    ("tool", "cli_args", "tool_args"),
+    [
+        ("data_freshness", [], {}),
+        ("sleep_summary", [], {}),
+        ("sleep_summary", ["--days", "3"], {"days": 3}),
+        ("sleep_night", ["2026-01-12"], {"date": "2026-01-12"}),
+        ("workouts", [], {}),
+        (
+            "workouts", ["--from", "2026-01-09", "--to", "2026-01-12", "--limit", "1"],
+            {"from_date": "2026-01-09", "to": "2026-01-12", "limit": 1},
+        ),
+        ("readiness_today", [], {}),
+        ("metric_trend", ["custom_metric", "--days", "1"], {"key": "custom_metric", "days": 1}),
+        ("strain_day", ["2026-01-13"], {"date": "2026-01-13"}),
+        ("sleep_detail", ["2026-01-12"], {"date": "2026-01-12"}),
+    ],
+)
+def test_query_matches_tool_output(populated_store, capsys, tool, cli_args, tool_args):
+    expected = getattr(server, tool)(**tool_args)
+    main(["query", tool, *cli_args])
+    captured = capsys.readouterr()
+    assert captured.out == expected + "\n"
+    assert captured.err == ""
+
+
+def test_query_list_matches_registered_tools(monkeypatch, capsys):
+    monkeypatch.delenv("HUB_DB_PATH", raising=False)
+    registered = list_mcp_tools()
+
+    main(["query", "--list"])
+    captured = capsys.readouterr()
+    assert set(captured.out.splitlines()) == {
+        f"{tool.name}\t{tool.description.splitlines()[0]}" for tool in registered
+    }
+    assert captured.err == ""
+
+    for tool in registered:
+        with pytest.raises(SystemExit) as exit_info:
+            main(["query", tool.name, "--help"])
+        assert exit_info.value.code == 0
+        assert f"strap-hub query {tool.name}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "cli_args",
+    [
+        [],
+        ["--list", "data_freshness"],
+        ["unknown_tool"],
+        ["sleep_detail"],
+        ["sleep_detail", "2026-1-12"],
+        ["sleep_detail", "2026-02-30"],
+        ["sleep_summary", "--days", "1.5"],
+        ["sleep_summary", "--days", "91"],
+        ["workouts", "--from", "2026-01-13", "--to", "2026-01-12"],
+        ["workouts", "--cursor", "bad cursor"],
+        ["data_freshness", "--unexpected"],
+    ],
+)
+def test_query_invalid_arguments_exit_with_argparse_error(capsys, cli_args):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["query", *cli_args])
+    assert exit_info.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "usage: strap-hub" in captured.err
+    assert "error:" in captured.err
+
+
+def test_query_missing_store_returns_json_error(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "missing.db"
+    monkeypatch.setenv("HUB_DB_PATH", str(db_path))
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["query", "data_freshness"])
+    assert exit_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "Check HUB_DB_PATH" in json.loads(captured.out)["error"]
+    assert str(db_path) not in captured.out
+    assert captured.err == ""
+    assert not db_path.exists()
+
+
+def test_query_sanitizes_unexpected_errors(monkeypatch, capsys):
+    monkeypatch.setenv("HUB_DB_PATH", "private-fixture-path")
+
+    def failing_connect(path, *, read_only):
+        assert read_only
+        raise sqlite3.DatabaseError(str(path))
+
+    monkeypatch.setattr(server, "connect", failing_connect)
+    with pytest.raises(SystemExit) as exit_info:
+        main(["query", "data_freshness"])
+    assert exit_info.value.code == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"error": "Could not query the hub store"}
+    assert captured.err == ""
 
 
 def test_pre_cloud_v2_store_remains_readable_without_migration(tmp_path, monkeypatch):
