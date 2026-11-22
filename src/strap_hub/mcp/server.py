@@ -21,10 +21,11 @@ from mcp.types import ToolAnnotations
 from pydantic import Field, StringConstraints
 
 from strap_hub.mcp.cloud import (
-    BAND_WORKOUTS, RECOVERY, SLEEP_TOTALS, has_cloud_schema, metric_table, minutes,
+    BAND_WORKOUTS, RECOVERY, SLEEP_SCORE_FIELDS, has_cloud_schema, metric_table,
     sleep_record, token_status,
 )
 from strap_hub.store import connect
+from strap_hub.store.cloud import EFFECTIVE_WORKOUTS
 from strap_hub.whoop_cloud.sync import last_sync
 
 mcp = MCPServer("strap-hub")
@@ -34,9 +35,12 @@ SLEEP_MINUTES = ("tst_min", "deep_min", "rem_min", "light_min")
 MINUTE_KEYS = {*SLEEP_MINUTES, "nap_min", "duration_min"}
 SLEEP_KEYS = (*SLEEP_MINUTES, "efficiency", "rmssd", "rhr", "resp_rate")
 SLEEP_KEY_PARAMS = ", ".join("?" for _ in SLEEP_KEYS)
-DISPLAY_KEYS = {
+BAND_DISPLAY_KEYS = {
     *MINUTE_KEYS, *SLEEP_KEYS, "readiness", "strain", "skin_temp_z", "stress", "steps",
-    "calories", "calories_total", "max_hr", "hrr_bpm", "avg_hr", "kilojoule", "spo2_percentage",
+    "calories", "calories_total", "max_hr", "hrr_bpm",
+}
+DISPLAY_KEYS = {
+    *BAND_DISPLAY_KEYS, "avg_hr", "kilojoule", "spo2_percentage",
     "skin_temp_celsius", "sleep_performance_percentage", "sleep_consistency_percentage",
     "percent_recorded", "distance_meter", "altitude_gain_meter", "altitude_change_meter",
 }
@@ -204,8 +208,8 @@ def sleep_summary(
         )
 
 
-def _metric_provenance(sources: Mapping[str, str]) -> dict[str, object]:
-    source = _preferred_source(sources.values())
+def _metric_provenance(sources: Mapping[str, str], *, default: str = "band") -> dict[str, object]:
+    source = _preferred_source(sources.values()) if sources else default
     result: dict[str, object] = {"source": source}
     band_keys = sorted(key for key, origin in sources.items() if origin == "band")
     if source == "whoop_cloud" and band_keys:
@@ -243,19 +247,38 @@ def _band_night(db: sqlite3.Connection, day: str) -> dict:
     }
 
 
+def _band_sleep_totals(band: Mapping[str, float], night: dict) -> dict:
+    stage_totals = {key: band[key] for key in SLEEP_MINUTES if key in band}
+    return _metrics(stage_totals) | night["totals"]
+
+
+def _sleep_provenance(band_keys: Iterable[str], cloud_keys: Iterable[str], *, has_cloud_record: bool) -> dict:
+    origins = dict.fromkeys(band_keys, "band") | dict.fromkeys(cloud_keys, "whoop_cloud")
+    return _metric_provenance(origins, default="whoop_cloud" if has_cloud_record else "band")
+
+
 @mcp.tool(annotations=READ_ONLY, structured_output=False)
 def sleep_night(date: Annotated[str, ISO_DATE, Field(description="Date the source attributes the night to")]) -> str:
     """Inspect one night's stage totals and any recorded stage timeline or disturbances."""
     day = _parse_date(date).isoformat()
     with _read_store() as db:
+        night = _band_night(db, day)
         if has_cloud_schema(db):
             row = db.execute("SELECT * FROM cloud_sleep_night WHERE date = ?", (day,)).fetchone()
             if row is not None:
+                cloud = sleep_record(row)
+                band = dict(db.execute("SELECT key, value FROM day_metric WHERE date = ?", (day,)))
+                band_totals = _band_sleep_totals(band, night)
+                band_keys = band_totals.keys() - cloud["totals"].keys()
+                if night["segments"]:
+                    band_keys.update(("segments", "wake_count"))
+                cloud_keys = set(cloud["totals"]) | (cloud.keys() & {"disturbance_count"})
+                night["totals"] = band_totals | cloud["totals"]
                 return _result(
-                    db, source="whoop_cloud", date=day, segments=[], totals=minutes(row, SLEEP_TOTALS),
-                    wake_count=None, disturbance_count=row["disturbance_count"], score_state=row["score_state"],
+                    db, date=day, **night, **_sleep_provenance(band_keys, cloud_keys, has_cloud_record=True),
+                    disturbance_count=cloud.get("disturbance_count"), score_state=cloud["score_state"],
                 )
-        return _result(db, date=day, **_band_night(db, day))
+        return _result(db, date=day, **night)
 
 
 def _utc_label(timestamp: datetime) -> str:
@@ -308,7 +331,7 @@ def workouts(
     extras = ("kilojoule", "avg_hr", "percent_recorded", "distance_meter", "altitude_gain_meter",
               "altitude_change_meter")
     with _read_store() as db:
-        table = "effective_workout" if has_cloud_schema(db) else BAND_WORKOUTS
+        table = f"({EFFECTIVE_WORKOUTS})" if has_cloud_schema(db) else BAND_WORKOUTS
         page = db.execute(
             f"""SELECT date, {WORKOUT_START} AS start_key, id, type, duration_min, strain, calories,
                        max_hr, zone_min_json, source, score_state, {', '.join(extras)}
@@ -422,20 +445,22 @@ def metric_trend(
             (start.isoformat(), today.isoformat(), key),
         ).fetchall()
         values = [value for _, value, _ in rows]
+        source = _preferred_source(origin for _, _, origin in rows)
         stats = {}
         if values:
-            stats = {
-                "mean": _metric_number(key, fmean(values)),
-                "min": _metric_number(key, min(values)),
-                "max": _metric_number(key, max(values)),
-            }
+            stats = {"mean": fmean(values), "min": min(values), "max": max(values)}
+            if key in BAND_DISPLAY_KEYS or all(origin == "whoop_cloud" for _, _, origin in rows):
+                stats = {name: _metric_number(key, value) for name, value in stats.items()}
         return _result(
             db,
-            source=_preferred_source(source for _, _, source in rows),
+            source=source,
             key=key,
             values=[
-                {"date": day, "value": _metric_number(key, value), "source": source}
-                for day, value, source in rows
+                {
+                    "date": day, "source": origin,
+                    "value": _metric_number(key, value) if origin == "whoop_cloud" or key in BAND_DISPLAY_KEYS else value,
+                }
+                for day, value, origin in rows
             ],
             **stats,
         )
@@ -470,18 +495,60 @@ def strain_day(date: Annotated[str, ISO_DATE, Field(description="Local date of t
         return _result(db, date=day, **_metric_provenance(origins), **_metrics(metrics), **extra)
 
 
+def _main_sleep_detail(cloud: dict, band: Mapping[str, float], night: dict) -> dict | None:
+    cloud_totals = cloud.get("totals", {})
+    band_totals = _band_sleep_totals(band, night)
+    if "nap_min" in band:
+        band_totals["nap_min"] = _metric_number("nap_min", band["nap_min"])
+    band_metrics = _metrics({
+        key: band[key] for key, cloud_key in (
+            ("efficiency", "sleep_efficiency_percentage"), ("resp_rate", "respiratory_rate"),
+        ) if key in band and cloud_key not in cloud
+    })
+    timeline = {key: night[key] for key in ("segments", "wake_count")} if night["segments"] else {}
+    if not (cloud or band_totals or band_metrics):
+        return None
+    band_keys = (band_totals.keys() - cloud_totals.keys()) | band_metrics.keys() | timeline.keys()
+    cloud_keys = set(cloud_totals) | (cloud.keys() & SLEEP_SCORE_FIELDS)
+    if cloud.get("sleep_need_min"):
+        cloud_keys.add("sleep_need_min")
+    return {
+        **cloud, **band_metrics, **timeline,
+        "totals": band_totals | cloud_totals,
+        **_sleep_provenance(band_keys, cloud_keys, has_cloud_record=bool(cloud)),
+    }
+
+
+def _recovery_detail(row: sqlite3.Row | None, band: Mapping[str, float]) -> dict | None:
+    band_metrics = _metrics({key: band[key] for key in (*RECOVERY, "skin_temp_z") if key in band})
+    cloud_metrics = {}
+    state = {}
+    if row is not None:
+        state["score_state"] = row["score_state"]
+        if row["score_state"] == "SCORED":
+            cloud_metrics = _metrics({key: row[col] for key, col in RECOVERY.items() if row[col] is not None})
+            if row["user_calibrating"] is not None:
+                cloud_metrics["user_calibrating"] = bool(row["user_calibrating"])
+    if not (state or band_metrics):
+        return None
+    return {
+        **_sleep_provenance(band_metrics.keys() - cloud_metrics.keys(), cloud_metrics, has_cloud_record=bool(state)),
+        **band_metrics, **cloud_metrics, **state,
+    }
+
+
 @mcp.tool(annotations=READ_ONLY, structured_output=False)
 def sleep_detail(date: Annotated[str, ISO_DATE, Field(description="Local wake date")]) -> str:
     """Get sleep stages, sleep need, performance, respiratory rate, naps and recovery."""
     day = _parse_date(date).isoformat()
     with _read_store() as db:
-        sleep = None
-        recovery = None
+        cloud_sleep = {}
+        recovery_row = None
         naps = []
         if has_cloud_schema(db):
             row = db.execute("SELECT * FROM cloud_sleep_night WHERE date = ?", (day,)).fetchone()
             if row is not None:
-                sleep = sleep_record(row)
+                cloud_sleep = sleep_record(row)
             naps = [
                 sleep_record(row) for row in db.execute(
                     """SELECT *, total_light_sleep_time_milli + total_slow_wave_sleep_time_milli
@@ -490,36 +557,11 @@ def sleep_detail(date: Annotated[str, ISO_DATE, Field(description="Local wake da
                     (day,),
                 )
             ]
-            row = db.execute("SELECT * FROM cloud_recovery_day WHERE date = ?", (day,)).fetchone()
-            if row is not None:
-                recovery = {
-                    "source": "whoop_cloud",
-                    "score_state": row["score_state"],
-                    **_metrics({key: row[col] for key, col in RECOVERY.items() if row[col] is not None}),
-                }
-                if row["user_calibrating"] is not None:
-                    recovery["user_calibrating"] = bool(row["user_calibrating"])
+            recovery_row = db.execute("SELECT * FROM cloud_recovery_day WHERE date = ?", (day,)).fetchone()
 
-        if sleep is None or recovery is None:
-            band = dict(db.execute(
-                f"""SELECT key, value FROM day_metric WHERE date = ?
-                    AND key IN ({SLEEP_KEY_PARAMS}, 'readiness', 'skin_temp_z', 'nap_min')""",
-                (day, *SLEEP_KEYS),
-            ))
-            if sleep is None:
-                night = _band_night(db, day)
-                totals = {key: band[key] for key in (*SLEEP_MINUTES, "nap_min") if key in band}
-                totals.update(night["totals"])
-                metrics = _metrics({key: band[key] for key in ("efficiency", "resp_rate") if key in band})
-                if totals or metrics:
-                    sleep = {"source": "band", "totals": _metrics(totals), **metrics}
-            if recovery is None:
-                metrics = _metrics({
-                    key: band[key] for key in ("readiness", "rhr", "rmssd", "skin_temp_z") if key in band
-                })
-                if metrics:
-                    recovery = {"source": "band", **metrics}
-
+        band = dict(db.execute("SELECT key, value FROM day_metric WHERE date = ?", (day,)))
+        sleep = _main_sleep_detail(cloud_sleep, band, _band_night(db, day))
+        recovery = _recovery_detail(recovery_row, band)
         source = _preferred_source(part["source"] for part in (sleep, recovery, *naps) if part is not None)
         return _result(db, source=source, date=day, sleep=sleep, recovery=recovery, naps=naps)
 

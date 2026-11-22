@@ -94,7 +94,29 @@ CREATE VIEW IF NOT EXISTS effective_day_metric AS
     SELECT 1 FROM cloud_metric c WHERE c.date = b.date AND c.key = b.key
   );
 
-CREATE VIEW IF NOT EXISTS effective_workout AS
+"""
+
+# Also used directly by read-only MCP connections so existing v3 stores get
+# session matching without requiring a writable schema upgrade.
+EFFECTIVE_WORKOUTS = """
+  WITH band_times AS (
+    SELECT id, julianday(start) AS starts,
+      COALESCE(julianday(end), julianday(start) + duration_min / 1440.0) AS ends
+    FROM workout
+  ), cloud_times AS (
+    SELECT id, julianday(start) AS starts, julianday(end) AS ends
+    FROM cloud_workout
+  ), matches AS (
+    SELECT b.id, ROW_NUMBER() OVER (
+      PARTITION BY c.id ORDER BY ABS(b.starts - c.starts), b.id
+    ) AS position
+    FROM cloud_times c JOIN band_times b ON
+      (ROUND(ABS(b.starts - c.starts) * 86400, 3) <= 120
+        AND (b.ends IS NULL OR c.ends IS NULL OR MIN(b.ends, c.ends) > MAX(b.starts, c.starts)))
+      OR (MIN(b.ends, c.ends) > MAX(b.starts, c.starts)
+        AND MIN(b.ends, c.ends) - MAX(b.starts, c.starts) >=
+          0.5 * MAX(b.ends - b.starts, c.ends - c.starts))
+  )
   SELECT date, 'whoop:' || id AS id, start, sport_name AS type,
     ROUND((julianday(end) - julianday(start)) * 1440, 4) AS duration_min,
     strain, kilojoule / 4.184 AS calories, max_heart_rate AS max_hr,
@@ -108,5 +130,7 @@ CREATE VIEW IF NOT EXISTS effective_workout AS
   UNION ALL
   SELECT date, id, start, type, duration_min, strain, calories, max_hr, zone_min_json,
     'band' AS source, NULL, NULL, NULL, NULL, NULL, NULL, NULL
-  FROM workout b WHERE NOT EXISTS (SELECT 1 FROM cloud_workout c WHERE c.date = b.date);
+  FROM workout b WHERE NOT EXISTS (SELECT 1 FROM matches WHERE matches.id = b.id AND position = 1)
 """
+
+CLOUD_SCHEMA += f"CREATE VIEW IF NOT EXISTS effective_workout AS {EFFECTIVE_WORKOUTS};"

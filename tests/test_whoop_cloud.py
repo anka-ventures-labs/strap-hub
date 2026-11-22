@@ -512,8 +512,8 @@ def test_mcp_prefers_cloud_and_labels_band_fallback(cloud, collections, monkeypa
             """INSERT INTO workout (id, date, start, type, duration_min, algo_version, received_at)
                VALUES (?, ?, ?, 'band-session', 30, 1, ?)""",
             [
-                ("fixture-dupe", "2026-01-13", "2026-01-13T05:00:00Z", NOW.isoformat()),
-                ("fixture-fallback", "2026-01-12", "2026-01-12T05:00:00Z", NOW.isoformat()),
+                ("fixture-dupe", "2026-01-13", "2026-01-13T23:05:00-06:00", NOW.isoformat()),
+                ("fixture-fallback", "2026-01-13", "2026-01-13T03:00:00Z", NOW.isoformat()),
             ],
         )
 
@@ -572,7 +572,85 @@ def test_mcp_prefers_cloud_and_labels_band_fallback(cloud, collections, monkeypa
         "distance_meter": 4500, "altitude_gain_meter": 35, "altitude_change_meter": -5,
     }]
     following = json.loads(server.workouts(limit=1, cursor=workout_page["next_cursor"]))
-    assert following["workouts"][0]["source"] == "band"
+    assert following["workouts"] == [
+        {"date": "2026-01-13", "type": "band-session", "source": "band", "duration_min": 30},
+    ]
     assert following["totals"] == workout_page["totals"] == {
         "count": 2, "duration_min": 75, "calories": 250, "zone_min": {"z0": 2, "z2": 20},
     }
+
+
+@pytest.mark.parametrize("score_state", ["PENDING_SCORE", "UNSCORABLE", "SCORED"])
+def test_sleep_tools_keep_band_values_when_cloud_scores_are_missing(cloud, collections, score_state):
+    from strap_hub.mcp import server
+
+    db_path, store = cloud
+    sleep = collections["/activity/sleep"][0]
+    sleep["score_state"] = score_state
+    if score_state == "SCORED":
+        sleep["score"] = {"stage_summary": {"total_rem_sleep_time_milli": 1800000}}
+    recovery = collections["/recovery"][0]
+    recovery["score"] = {} if score_state != "SCORED" else {"recovery_score": 80}
+    with httpx.Client(transport=transport_for(collections)) as http:
+        sync(db_path, OAuth(OAuthConfig("fixture-id", "fixture-secret"), store, http), SINCE)
+
+    day = "2026-01-14"
+    segment = {"start": "2026-01-14T02:00:00Z", "end": "2026-01-14T03:00:00Z", "stage": "light"}
+    with closing(connect(db_path)) as db, db:
+        db.execute(
+            "INSERT INTO sleep_segment (date, start, end, stage, algo_version) VALUES (?, ?, ?, ?, 1)",
+            (day, *segment.values()),
+        )
+        db.executemany(
+            "INSERT INTO day_metric (date, key, value, algo_version, received_at) VALUES (?, ?, ?, 1, ?)",
+            [(day, key, value, NOW.isoformat()) for key, value in
+             (("readiness", 65), ("rhr", 62), ("rmssd", 32), ("efficiency", 83))],
+        )
+
+    night = json.loads(server.sleep_night(day))
+    detail = json.loads(server.sleep_detail(day))
+    for report in (night, detail["sleep"]):
+        assert report["score_state"] == score_state
+        assert report["segments"] == [segment]
+        assert report["wake_count"] == 0
+        assert report["totals"]["tst_min"] == report["totals"]["light_min"] == 60
+    assert detail["sleep"]["efficiency"] == 83
+    if score_state == "SCORED":
+        assert night["source"] == detail["sleep"]["source"] == "whoop_cloud"
+        assert night["totals"]["rem_min"] == detail["sleep"]["totals"]["rem_min"] == 30
+        assert night["band_keys"] == ["light_min", "segments", "tst_min", "wake_count"]
+        assert detail["sleep"]["band_keys"] == ["efficiency", *night["band_keys"]]
+        assert detail["recovery"] == {
+            "source": "whoop_cloud", "score_state": "SCORED", "readiness": 80,
+            "rhr": 62, "rmssd": 32, "band_keys": ["rhr", "rmssd"],
+        }
+    else:
+        assert night["source"] == detail["sleep"]["source"] == "band"
+        assert night["totals"] == detail["sleep"]["totals"] == {"light_min": 60, "tst_min": 60}
+        assert detail["recovery"] == {
+            "source": "band", "score_state": "SCORED", "readiness": 65, "rhr": 62, "rmssd": 32,
+        }
+
+
+def test_metric_trend_keeps_band_precision_for_new_cloud_key(cloud, collections, monkeypatch):
+    from strap_hub.mcp import server
+
+    db_path, store = cloud
+    monkeypatch.setattr(server, "_today", lambda: NOW.date())
+    collections["/cycle"][0]["score"]["kilojoule"] = 1234.56789
+    with httpx.Client(transport=transport_for(collections)) as http:
+        sync(db_path, OAuth(OAuthConfig("fixture-id", "fixture-secret"), store, http), SINCE)
+    with closing(connect(db_path)) as db, db:
+        db.execute(
+            """INSERT INTO day_metric (date, key, value, algo_version, received_at)
+               VALUES ('2026-01-14', 'kilojoule', 987.654321, 1, ?)""",
+            (NOW.isoformat(),),
+        )
+
+    band_only = json.loads(server.metric_trend("kilojoule", 1))
+    assert band_only["mean"] == band_only["min"] == band_only["max"] == 987.654321
+    assert band_only["values"] == [{"date": "2026-01-14", "source": "band", "value": 987.654321}]
+    mixed = json.loads(server.metric_trend("kilojoule", 2))
+    assert mixed["values"] == [
+        {"date": "2026-01-13", "source": "whoop_cloud", "value": 1234.6}, *band_only["values"],
+    ]
