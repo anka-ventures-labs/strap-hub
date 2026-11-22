@@ -15,12 +15,12 @@ import pytest
 from strap_hub.cli import main
 from strap_hub.store import connect
 from strap_hub.whoop_cloud import commands
-from strap_hub.whoop_cloud.client import API_BASE, WhoopClient
+from strap_hub.whoop_cloud.client import API_BASE, PROFILE_ENDPOINT, WhoopClient
 from strap_hub.whoop_cloud.oauth import (
     AUTH_URL, SCOPES, TOKEN_URL, OAuth, OAuthConfig, TokenStore, Tokens, WhoopError,
     authorization_url, callback_code, new_state, token_path,
 )
-from strap_hub.whoop_cloud.sync import LAST_SYNC, SYNC_END, sync, sync_window
+from strap_hub.whoop_cloud.sync import LAST_SYNC, OWNER, SYNC_END, sync, sync_window
 
 SLEEP_ID = "00000000-0000-4000-8000-000000000001"
 NAP_ID = "00000000-0000-4000-8000-000000000002"
@@ -31,13 +31,13 @@ SINCE = date(2026, 1, 7)
 
 @pytest.fixture
 def cloud(tmp_path, monkeypatch):
-    db = tmp_path / "hub.db"
+    db = tmp_path.resolve() / "hub.db"
     monkeypatch.setenv("HUB_DB_PATH", str(db))
     monkeypatch.delenv("HUB_WHOOP_TOKEN_PATH", raising=False)
     monkeypatch.delenv("WHOOP_SYNC_WINDOW_DAYS", raising=False)
     store = TokenStore(token_path(db))
     with store.locked() as credentials:
-        credentials.save(Tokens("fixture-access", "fixture-refresh", time.time() + 3600))
+        credentials.save(Tokens("fixture-access", "fixture-refresh", time.time() + 3600, user_id=1))
     return str(db), store
 
 
@@ -98,6 +98,8 @@ def transport_for(collections):
         assert request.url.host == "api.prod.whoop.com"
         assert request.headers["Authorization"] == "Bearer fixture-access"
         endpoint = request.url.path.removeprefix("/developer/v2")
+        if endpoint == PROFILE_ENDPOINT:
+            return httpx.Response(200, json={"user_id": 1})
         return httpx.Response(200, json={"records": collections[endpoint], "next_token": None})
 
     return httpx.MockTransport(respond)
@@ -126,7 +128,7 @@ def test_authorization_url_and_rejects_callback_with_wrong_or_duplicate_state():
 def test_refresh_rotates_both_tokens_once_under_contention(cloud):
     _, store = cloud
     with store.locked() as credentials:
-        credentials.save(Tokens("fixture-old-access", "fixture-old-refresh", time.time() - 10))
+        credentials.save(Tokens("fixture-old-access", "fixture-old-refresh", time.time() - 10, user_id=1))
     first_refresh = Event()
     second_attempt = Event()
     calls = []
@@ -147,6 +149,7 @@ def test_refresh_rotates_both_tokens_once_under_contention(cloud):
         with oauth.session() as session:
             result = session.access_token()
             assert session.credentials.load().refresh_token == "fixture-new-refresh"
+            assert session.tokens.user_id == 1
             return result
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as http, ThreadPoolExecutor(2) as workers:
@@ -227,7 +230,7 @@ with httpx.Client(transport=httpx.MockTransport(unexpected_request)) as http:
 
 
 def test_credentials_require_a_trusted_directory(tmp_path):
-    parent = tmp_path / "shared"
+    parent = tmp_path.resolve() / "shared"
     store = TokenStore(parent / "private" / "token.json")
     with store.locked() as credentials:
         assert credentials.load() is None
@@ -244,6 +247,45 @@ def test_credentials_require_a_trusted_directory(tmp_path):
     with pytest.raises(WhoopError, match="unsafe parent"):
         with store.locked():
             pytest.fail("A writable parent could swap the credential directory")
+
+
+def test_stale_stage_cannot_replace_the_live_pair(cloud, caplog):
+    _, store = cloud
+    old = store.path.read_text()
+    with store.locked() as credentials:
+        credentials.save(Tokens("fixture-current", "fixture-current-refresh", time.time() - 10, user_id=1))
+    staged = store.path.with_suffix(".json.staged")
+    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(old)
+    assert store.status()["token_state"] == "expired"
+    with store.locked() as credentials:
+        assert credentials.load().access_token == "fixture-current"
+    assert not staged.exists()
+    assert "without a newer generation" in caplog.text
+    assert "fixture-" not in caplog.text
+
+
+def test_configured_token_directory_rejects_a_retargeted_symlink(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    first = root / "first"
+    second = root / "second"
+    first.mkdir()
+    second.mkdir()
+    alias = root / "alias"
+    alias.symlink_to(first, target_is_directory=True)
+    monkeypatch.setenv("HUB_WHOOP_TOKEN_PATH", str(alias / "nested" / "token.json"))
+    configured = token_path(root / "hub.db")
+    assert configured.parent.parent == alias
+    alias.unlink()
+    alias.symlink_to(second, target_is_directory=True)
+
+    store = TokenStore(configured)
+    with pytest.raises(OSError):
+        with store.locked():
+            pytest.fail("Opened a symlinked credential directory")
+    assert store.status()["token_state"] == "unreadable"
+    assert list(first.iterdir()) == list(second.iterdir()) == []
 
 
 def test_pagination_and_rate_limit_backoff(cloud, monkeypatch):
@@ -313,6 +355,8 @@ def test_failed_collection_keeps_rows_and_cursor_untouched(cloud, collections):
 
     def fail_workout_second_page(request):
         endpoint = request.url.path.removeprefix("/developer/v2")
+        if endpoint == PROFILE_ENDPOINT:
+            return httpx.Response(200, json={"user_id": 1})
         if endpoint == "/activity/workout":
             if request.url.params.get("nextToken") == "fixture-next":
                 return httpx.Response(403)
@@ -327,6 +371,117 @@ def test_failed_collection_keeps_rows_and_cursor_untouched(cloud, collections):
         assert db.execute("SELECT step_count FROM cloud_cycle WHERE id = 1").fetchone()[0] == 8100
         assert db.execute("SELECT COUNT(*) FROM cloud_sleep").fetchone()[0] == 2
         assert db.execute("SELECT COUNT(*) FROM cloud_workout").fetchone()[0] == 1
+
+
+def test_empty_account_switch_requires_explicit_replace(cloud, collections, monkeypatch, capsys):
+    db_path, store = cloud
+    with httpx.Client(transport=transport_for(collections)) as http:
+        sync(db_path, OAuth(OAuthConfig("fixture-id", "fixture-secret"), store, http), SINCE)
+    with closing(connect(db_path)) as db, db:
+        db.execute(
+            "INSERT INTO day_metric (date, key, value, algo_version, received_at) VALUES (?, 'strain', 5, 1, ?)",
+            ("2026-01-14", NOW.isoformat()),
+        )
+        before = list(db.iterdump())
+    monkeypatch.setenv("WHOOP_CLIENT_ID", "fixture-id")
+    monkeypatch.setenv("WHOOP_CLIENT_SECRET", "fixture-secret")
+    monkeypatch.setenv("WHOOP_REDIRECT_URI", "https://localhost:8771/whoop/callback")
+    monkeypatch.setattr(commands, "new_state", lambda: "fixture-state")
+    monkeypatch.setattr(commands, "getpass", lambda _: (
+        "https://localhost:8771/whoop/callback?state=fixture-state&code=fixture-account-b-code"
+    ))
+    calls = []
+
+    def account_b(request):
+        calls.append(request.url.path)
+        if request.method == "POST":
+            return httpx.Response(200, json={"access_token": "fixture-b-access", "refresh_token": "fixture-b-refresh",
+                                            "expires_in": 3600})
+        if request.url.path == f"/developer/v2{PROFILE_ENDPOINT}":
+            return httpx.Response(200, json={"user_id": 2})
+        return httpx.Response(200, json={"records": []})
+
+    monkeypatch.setattr(commands, "http_client", lambda: httpx.Client(transport=httpx.MockTransport(account_b)))
+    with pytest.raises(SystemExit):
+        main(["whoop-auth", "--paste"])
+    assert "different or unknown WHOOP account" in capsys.readouterr().err
+    assert json.loads(store.path.read_text())["user_id"] == 1
+    with store.locked() as credentials:
+        # Simulate reusing a token file authorized against a separate store.
+        credentials.save(Tokens("fixture-b-access", "fixture-b-refresh", time.time() + 3600, user_id=2))
+    calls.clear()
+    with pytest.raises(SystemExit):
+        main(["whoop-sync", "--since", SINCE.isoformat()])
+    assert "different or unknown WHOOP account" in capsys.readouterr().err
+    assert calls == [f"/developer/v2{PROFILE_ENDPOINT}"]
+    with closing(connect(db_path, read_only=True)) as db:
+        assert list(db.iterdump()) == before
+
+    main(["whoop-auth", "--paste", "--replace-account"])
+    assert "WHOOP authorization saved." in capsys.readouterr().out
+    assert json.loads(store.path.read_text())["user_id"] == 2
+    with closing(connect(db_path, read_only=True)) as db:
+        metadata = dict(db.execute("SELECT key, value FROM meta"))
+        assert metadata[OWNER] == "2"
+        assert LAST_SYNC not in metadata and SYNC_END not in metadata
+        assert all(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+                   for table in ("cloud_cycle", "cloud_recovery", "cloud_sleep", "cloud_workout"))
+        assert db.execute("SELECT value FROM day_metric").fetchone()[0] == 5
+    main(["whoop-sync", "--since", SINCE.isoformat()])
+    assert set(json.loads(capsys.readouterr().out)["row_counts"].values()) == {0}
+
+
+@pytest.mark.parametrize(("status", "body", "error"), [
+    (403, {}, "HTTP 403"),
+    (200, {}, "valid account identifier"),
+    (200, {"user_id": True}, "valid account identifier"),
+    (200, {"user_id": 2}, "does not match the authorized account"),
+])
+def test_profile_failure_prevents_reconciliation(cloud, collections, status, body, error):
+    db_path, store = cloud
+    config = OAuthConfig("fixture-id", "fixture-secret")
+    with httpx.Client(transport=transport_for(collections)) as http:
+        sync(db_path, OAuth(config, store, http), SINCE)
+    with closing(connect(db_path, read_only=True)) as db:
+        before = list(db.iterdump())
+
+    def profile(request):
+        assert str(request.url) == f"{API_BASE}{PROFILE_ENDPOINT}"
+        return httpx.Response(status, json=body)
+
+    with httpx.Client(transport=httpx.MockTransport(profile)) as http:
+        with pytest.raises(WhoopError, match=error):
+            sync(db_path, OAuth(config, store, http), SINCE)
+    with closing(connect(db_path, read_only=True)) as db:
+        assert list(db.iterdump()) == before
+
+
+def test_sync_rechecks_account_after_a_collection_rotates_the_grant(cloud, collections):
+    db_path, store = cloud
+    config = OAuthConfig("fixture-id", "fixture-secret")
+    with httpx.Client(transport=transport_for(collections)) as http:
+        sync(db_path, OAuth(config, store, http), SINCE)
+    with closing(connect(db_path, read_only=True)) as db:
+        before = list(db.iterdump())
+
+    def rotate_to_different_account(request):
+        if request.method == "POST":
+            assert str(request.url) == TOKEN_URL
+            return httpx.Response(200, json={"access_token": "fixture-new-access",
+                                            "refresh_token": "fixture-new-refresh", "expires_in": 3600})
+        if request.headers["Authorization"] == "Bearer fixture-new-access":
+            assert str(request.url) == f"{API_BASE}{PROFILE_ENDPOINT}"
+            return httpx.Response(200, json={"user_id": 2})
+        if str(request.url) == f"{API_BASE}{PROFILE_ENDPOINT}":
+            return httpx.Response(200, json={"user_id": 1})
+        assert request.url.path == "/developer/v2/cycle"
+        return httpx.Response(401)
+
+    with httpx.Client(transport=httpx.MockTransport(rotate_to_different_account)) as http:
+        with pytest.raises(WhoopError, match="does not match the authorized account"):
+            sync(db_path, OAuth(config, store, http), SINCE)
+    with closing(connect(db_path, read_only=True)) as db:
+        assert list(db.iterdump()) == before
 
 
 def test_sync_removes_missing_rows_in_window_and_backfills_older_deletions(cloud, collections, monkeypatch):
@@ -409,7 +564,7 @@ def test_sync_uses_previous_cutoff_through_outages(cloud, monkeypatch):
 def test_cli_authorizes_syncs_reports_status_and_revokes_without_disclosing_tokens(
     tmp_path, monkeypatch, capsys, collections,
 ):
-    db_path = tmp_path / "hub.db"
+    db_path = tmp_path.resolve() / "hub.db"
     monkeypatch.setenv("HUB_DB_PATH", str(db_path))
     monkeypatch.delenv("HUB_WHOOP_TOKEN_PATH", raising=False)
     monkeypatch.setenv("WHOOP_CLIENT_ID", "fixture-id")
@@ -435,6 +590,8 @@ def test_cli_authorizes_syncs_reports_status_and_revokes_without_disclosing_toke
         if request.method == "DELETE":
             assert str(request.url) == f"{API_BASE}/user/access"
             return httpx.Response(204)
+        if request.url.path == f"/developer/v2{PROFILE_ENDPOINT}":
+            return httpx.Response(200, json={"user_id": 1, "fixture_extra": "fixture-discard-me"})
         return httpx.Response(200, json={
             "records": collections[request.url.path.removeprefix("/developer/v2")],
         })
@@ -449,6 +606,9 @@ def test_cli_authorizes_syncs_reports_status_and_revokes_without_disclosing_toke
     auth_output = capsys.readouterr().out
     assert AUTH_URL in auth_output
     assert not any(value in auth_output for value in ("fixture-secret", "fixture-code", "fixture-access"))
+    token_file = json.loads(token_path(db_path).read_text())
+    assert token_file["user_id"] == 1
+    assert set(token_file) == {"access_token", "refresh_token", "expires_at", "user_id", "generation"}
     main(["whoop-sync", "--since", "2026-01-07"])
     assert json.loads(capsys.readouterr().out)["row_counts"]["cloud_recovery"] == 1
 
@@ -598,6 +758,73 @@ def test_mcp_prefers_cloud_and_labels_band_fallback(cloud, collections, monkeypa
     assert following["totals"] == workout_page["totals"] == {
         "count": 2, "duration_min": 75, "calories": 250, "zone_min": {"z0": 2, "z2": 20},
     }
+
+
+def test_workout_matching_assigns_each_band_session_once(cloud, collections):
+    from strap_hub.mcp import server
+
+    db_path, store = cloud
+    first = {
+        **collections["/activity/workout"][0], "sport_name": "first",
+        "start": "2026-01-13T10:00:00Z", "end": "2026-01-13T10:20:00Z",
+        "score": {},
+    }
+    second = {
+        **first, "id": "00000000-0000-4000-8000-000000000004", "sport_name": "second",
+        "start": "2026-01-13T10:01:00Z", "end": "2026-01-13T10:21:00Z",
+    }
+    collections["/activity/workout"] = [second, first]
+    with httpx.Client(transport=transport_for(collections)) as http:
+        sync(db_path, OAuth(OAuthConfig("fixture-id", "fixture-secret"), store, http), SINCE)
+    with closing(connect(db_path)) as db, db:
+        db.executemany(
+            """INSERT INTO workout (id, date, start, type, duration_min, calories, algo_version, received_at)
+               VALUES (?, '2026-01-13', ?, 'band-session', 20, ?, 1, ?)""",
+            [
+                ("fixture-first", "2026-01-13T10:00:00Z", 210, NOW.isoformat()),
+                ("fixture-second", "2026-01-13T10:03:00Z", 190, NOW.isoformat()),
+            ],
+        )
+    first_page = json.loads(server.workouts("2026-01-13", "2026-01-13", limit=1))
+    second_page = json.loads(server.workouts("2026-01-13", "2026-01-13", limit=1, cursor=first_page["next_cursor"]))
+    sessions = first_page["workouts"] + second_page["workouts"]
+    assert [(row["type"], row["calories"], row["band_keys"]) for row in sessions] == [
+        ("second", 190, ["calories"]), ("first", 210, ["calories"]),
+    ]
+    assert first_page["totals"] == second_page["totals"] == {"count": 2, "duration_min": 40, "calories": 400}
+    assert "next_cursor" not in second_page
+
+
+@pytest.mark.parametrize("score_state", ["PENDING_SCORE", "UNSCORABLE", "SCORED"])
+def test_matched_workout_fills_missing_fields_and_zone_minutes(cloud, collections, score_state):
+    from strap_hub.mcp import server
+
+    db_path, store = cloud
+    cloud_workout = collections["/activity/workout"][0]
+    cloud_workout["score_state"] = score_state
+    cloud_workout["score"] = {"strain": 0, "zone_durations": {"zone_two_milli": 0, "zone_three_milli": 120000}}
+    with httpx.Client(transport=transport_for(collections)) as http:
+        sync(db_path, OAuth(OAuthConfig("fixture-id", "fixture-secret"), store, http), SINCE)
+    with closing(connect(db_path)) as db, db:
+        db.execute(
+            """INSERT INTO workout (id, date, start, type, duration_min, strain, calories,
+                   max_hr, zone_min_json, algo_version, received_at)
+               VALUES ('fixture-dupe', '2026-01-13', ?, 'band-session', 30, 8, 210, 155, ?, 1, ?)""",
+            (cloud_workout["start"], json.dumps({"z1": 13, "z2": 7}), NOW.isoformat()),
+        )
+    result = json.loads(server.workouts("2026-01-13", "2026-01-13"))
+    session, = result["workouts"]
+    assert session["source"] == "whoop_cloud" and session["score_state"] == score_state
+    assert session["calories"] == 210 and session["max_hr"] == 155
+    if score_state == "SCORED":
+        assert session["strain"] == 0
+        assert session["zone_min"] == {"z1": 13, "z2": 0, "z3": 2}
+        assert session["band_keys"] == ["calories", "max_hr", "zone_min.z1"]
+    else:
+        assert session["strain"] == 8
+        assert session["zone_min"] == {"z1": 13, "z2": 7}
+        assert session["band_keys"] == ["calories", "max_hr", "strain", "zone_min.z1", "zone_min.z2"]
+    assert result["totals"] == {"count": 1, "duration_min": 45, "calories": 210, "zone_min": session["zone_min"]}
 
 
 @pytest.mark.parametrize("score_state", ["PENDING_SCORE", "UNSCORABLE", "SCORED"])

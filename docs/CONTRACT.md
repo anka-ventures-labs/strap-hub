@@ -195,10 +195,15 @@ Cloud values take precedence for matching dates and metric keys. Missing values
 fall back to recorded band metrics. Workouts match by UTC time, using starts
 within two minutes when the sessions overlap or an end time is unknown. Longer
 start differences can match when overlap covers at least half of the longer
-session. Each cloud workout replaces at most one band workout, chosen by nearest
-start. Other band workouts keep their own dates and sources.
-Cloud workout totals convert kilojoules to kcal at 4.184 kJ per kcal. When only
-band total kcal exists, `strain_day` uses that conversion for kilojoules.
+session. The hub considers all candidate pairs by nearest start, then longest
+overlap, then stable IDs, assigning each workout at most once. Unmatched band
+workouts keep their own dates and sources.
+Matched workouts keep the cloud session and its `score_state`. Scored cloud
+values take precedence, and the matching band session supplies missing duration,
+strain, calories, peak HR and individual zone minutes. The session's `band_keys`
+names each band field, using paths such as `zone_min.z2` for zones. Range totals
+use the merged sessions and convert cloud kilojoules to kcal at 4.184 kJ per kcal.
+When only band total kcal exists, `strain_day` uses that conversion for kilojoules.
 
 For sleep and recovery, values from `SCORED` WHOOP records take precedence
 field by field. Band data fills missing values and supplies the timeline and
@@ -251,8 +256,19 @@ intact.
 `meta.whoop_sync_end` records the UTC cutoff for the next incremental window.
 An explicit backfill reconciles its entire window. A backfill starting after
 the incremental window leaves the cutoff in place so the next poll can cover
-the gap. The store is single-account
-and uses the collection account identifier to reject data from a different
-account. API profile and body measurement payloads are outside the sync scope.
+the gap.
+
+The store is single-account. `whoop-auth` fetches the v2 basic profile and
+persists its `user_id` with the grant. Each sync verifies the profile against
+the grant and the store's `meta.whoop_owner_id` before fetching collections.
+It also verifies a token rotated during collection fetches before using it.
+A profile error, unknown identity or mismatch prevents any cloud writes, even
+when the authorized account has no records. The first successful sync binds an
+empty store to the verified account. A different account requires a separate
+store or an explicit `whoop-auth --replace-account`, which clears the previous
+cloud records and sync timestamps and binds the store to the new account in one
+transaction. Band data and digest history are preserved.
+The hub keeps only the account ID from the profile. Body measurements are
+outside the sync scope.
 Journal, behaviours, ECG and stage segments are outside the official v2 data
 available to this integration. See the [WHOOP API reference](https://developer.whoop.com/api/).

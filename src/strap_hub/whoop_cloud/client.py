@@ -7,9 +7,10 @@ from collections.abc import Iterator
 
 import httpx
 
-from strap_hub.whoop_cloud.oauth import TokenSession, WhoopError
+from strap_hub.whoop_cloud.oauth import TokenSession, WhoopError, valid_user_id
 
 API_BASE = "https://api.prod.whoop.com/developer/v2"
+PROFILE_ENDPOINT = "/user/profile/basic"
 COLLECTIONS = {
     "cloud_cycle": "/cycle",
     "cloud_recovery": "/recovery",
@@ -37,12 +38,23 @@ class WhoopClient:
     def __init__(self, session: TokenSession) -> None:
         self.session = session
         self.http = session.oauth.http
+        self._verified_access_token: str | None = None
 
-    def _request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
-        access_token = self.session.access_token()
+    def _request(
+        self, method: str, endpoint: str, *, access_token: str | None = None, **kwargs,
+    ) -> httpx.Response:
+        refresh_allowed = access_token is None
+        if access_token is None:
+            access_token = self.session.access_token()
         refreshed = False
         retries = 0
         while True:
+            if (
+                endpoint != PROFILE_ENDPOINT and self._verified_access_token is not None
+                and self._verified_access_token != access_token
+            ):
+                # Collection requests can rotate the token partway through a sync.
+                self.verify_account(access_token=access_token)
             try:
                 response = self.http.request(
                     method, API_BASE + endpoint, headers={"Authorization": f"Bearer {access_token}"}, **kwargs,
@@ -55,7 +67,7 @@ class WhoopClient:
                 continue
             if response.is_success:
                 return response
-            if response.status_code == 401 and not refreshed:
+            if response.status_code == 401 and refresh_allowed and not refreshed:
                 access_token = self.session.access_token(refresh=True)
                 refreshed = True
                 continue
@@ -67,6 +79,25 @@ class WhoopClient:
                 retries += 1
                 continue
             raise WhoopError(f"WHOOP API request returned HTTP {response.status_code}")
+
+    def profile_user_id(self, *, access_token: str | None = None) -> int:
+        response = self._request("GET", PROFILE_ENDPOINT, access_token=access_token)
+        try:
+            user_id = response.json()["user_id"]
+            if valid_user_id(user_id):
+                return user_id
+        except (ValueError, TypeError, KeyError):
+            pass
+        raise WhoopError("WHOOP profile did not contain a valid account identifier")
+
+    def verify_account(self, *, access_token: str | None = None) -> int:
+        if self.session.tokens.user_id is None:
+            raise WhoopError("Run whoop-auth to bind these credentials to a WHOOP account")
+        user_id = self.profile_user_id(access_token=access_token)
+        if user_id != self.session.tokens.user_id:
+            raise WhoopError("WHOOP profile does not match the authorized account. Run whoop-auth.")
+        self._verified_access_token = self.session.tokens.access_token
+        return user_id
 
     def records(self, table: str, start: str, end: str) -> Iterator[dict]:
         params = {"limit": "25", "start": start, "end": end}

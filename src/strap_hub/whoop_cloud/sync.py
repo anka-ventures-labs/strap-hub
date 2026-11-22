@@ -8,7 +8,7 @@ import os
 import re
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -146,6 +146,56 @@ def _set_metadata(db: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
+def _requires_account_replacement(db: sqlite3.Connection, user_id: int) -> bool:
+    stored_owner = _metadata(db, OWNER)
+    if stored_owner is not None:
+        return stored_owner != str(user_id)
+    # Early v3 stores could contain rows without an owner. Require an explicit
+    # reset before reconciling data whose original account cannot be verified.
+    return _metadata(db, "schema_version") == "3" and (
+        last_sync(db) is not None or _metadata(db, SYNC_END) is not None
+        or any(db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() for table in COLLECTIONS)
+    )
+
+
+def _check_account(db: sqlite3.Connection, user_id: int) -> None:
+    if _requires_account_replacement(db, user_id):
+        raise WhoopError(
+            "The hub store belongs to a different or unknown WHOOP account. "
+            "Use a separate hub database or run whoop-auth --replace-account to clear its cloud history."
+        )
+
+
+def _check_existing_store(db_path: str | None, user_id: int) -> None:
+    if db_path and Path(db_path).expanduser().exists():
+        with closing(connect(db_path, read_only=True)) as db:
+            db.execute("BEGIN")
+            _check_account(db, user_id)
+
+
+def authorize(db_path: str | None, oauth: OAuth, code: str, *, replace_account: bool = False) -> None:
+    if replace_account and not db_path:
+        raise WhoopError("HUB_DB_PATH is required with --replace-account")
+    with oauth.exchange(code) as session:
+        user_id = WhoopClient(session).profile_user_id(access_token=session.tokens.access_token)
+        tokens = replace(session.tokens, user_id=user_id)
+        if not replace_account:
+            _check_existing_store(db_path, user_id)
+            session.credentials.save(tokens)
+            return
+
+        with write_transaction(db_path) as db:
+            # A failed token save leaves the old database binding in place. If
+            # promotion succeeded but SQLite cannot commit, sync still refuses
+            # to use the new grant against the old account's rows.
+            session.credentials.save(tokens)
+            if _requires_account_replacement(db, user_id):
+                for table in COLLECTIONS:
+                    db.execute(f"DELETE FROM {table}")
+                db.execute("DELETE FROM meta WHERE key IN (?, ?)", (LAST_SYNC, SYNC_END))
+            _set_metadata(db, OWNER, str(user_id))
+
+
 def _upsert(db: sqlite3.Connection, table: str, rows: list[dict]) -> None:
     if not rows:
         return
@@ -215,28 +265,24 @@ def sync_window(db_path: str, since: date | None = None) -> SyncWindow:
 
 def sync(db_path: str, oauth: OAuth, since: date | None = None) -> dict:
     with oauth.session() as session:
-        window = sync_window(db_path, since)
         client = WhoopClient(session)
+        user_id = client.verify_account()
+        _check_existing_store(db_path, user_id)
+        window = sync_window(db_path, since)
         batches = {}
-        owners = set()
         for table in COLLECTIONS:
             rows = []
             for record in client.records(table, window.start, window.end):
                 owner = record.get("user_id")
-                if owner is not None:
-                    if type(owner) is not int:
-                        raise WhoopError("WHOOP returned an invalid account identifier")
-                    owners.add(str(owner))
+                if owner is not None and (type(owner) is not int or owner != user_id):
+                    raise WhoopError("WHOOP returned a record for an invalid or different account")
                 rows.append(_normalize(table, record, window.end))
             batches[table] = rows
 
         completed_at = utc_now()
         with write_transaction(db_path) as db:
-            stored_owner = _metadata(db, OWNER)
-            if len(owners) > 1 or (stored_owner and owners and stored_owner not in owners):
-                raise WhoopError("Use a separate hub database for a different WHOOP account")
-            if owners:
-                _set_metadata(db, OWNER, owners.pop())
+            _check_account(db, user_id)
+            _set_metadata(db, OWNER, str(user_id))
             for table, rows in batches.items():
                 _upsert(db, table, rows)
             # Keep the start after the linked sleep disappears from a later response.

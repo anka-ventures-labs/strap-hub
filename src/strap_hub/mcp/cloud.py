@@ -7,7 +7,7 @@ from strap_hub.whoop_cloud.oauth import TokenStore, WhoopError, token_path
 BAND_METRICS = "(SELECT date, key, value, 'band' AS source FROM day_metric)"
 BAND_WORKOUTS = """(SELECT *, 'band' AS source, NULL AS score_state, NULL AS kilojoule, NULL AS avg_hr,
     NULL AS percent_recorded, NULL AS distance_meter, NULL AS altitude_gain_meter,
-    NULL AS altitude_change_meter FROM workout)"""
+    NULL AS altitude_change_meter, NULL AS band_keys_json FROM workout)"""
 SLEEP_TOTALS = {
     "tst_min": "total_sleep_milli",
     "light_min": "total_light_sleep_time_milli",

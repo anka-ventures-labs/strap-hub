@@ -99,38 +99,82 @@ CREATE VIEW IF NOT EXISTS effective_day_metric AS
 # Also used directly by read-only MCP connections so existing v3 stores get
 # session matching without requiring a writable schema upgrade.
 EFFECTIVE_WORKOUTS = """
-  WITH band_times AS (
+  WITH RECURSIVE band_times AS (
     SELECT id, julianday(start) AS starts,
       COALESCE(julianday(end), julianday(start) + duration_min / 1440.0) AS ends
     FROM workout
   ), cloud_times AS (
     SELECT id, julianday(start) AS starts, julianday(end) AS ends
     FROM cloud_workout
-  ), matches AS (
-    SELECT b.id, ROW_NUMBER() OVER (
-      PARTITION BY c.id ORDER BY ABS(b.starts - c.starts), b.id
+  ), pair_times AS (
+    SELECT c.id AS cloud_id, b.id AS band_id,
+      ROUND(ABS(b.starts - c.starts) * 86400, 3) AS start_delta,
+      MIN(b.ends, c.ends) - MAX(b.starts, c.starts) AS overlap,
+      MAX(b.ends - b.starts, c.ends - c.starts) AS longest_duration
+    FROM cloud_times c CROSS JOIN band_times b
+  ), candidates AS (
+    SELECT cloud_id, band_id, ROW_NUMBER() OVER (
+      ORDER BY start_delta, overlap DESC, cloud_id, band_id
     ) AS position
-    FROM cloud_times c JOIN band_times b ON
-      (ROUND(ABS(b.starts - c.starts) * 86400, 3) <= 120
-        AND (b.ends IS NULL OR c.ends IS NULL OR MIN(b.ends, c.ends) > MAX(b.starts, c.starts)))
-      OR (MIN(b.ends, c.ends) > MAX(b.starts, c.starts)
-        AND MIN(b.ends, c.ends) - MAX(b.starts, c.starts) >=
-          0.5 * MAX(b.ends - b.starts, c.ends - c.starts))
+    FROM pair_times
+    WHERE (start_delta <= 120 AND (overlap > 0 OR overlap IS NULL))
+      OR (overlap > 0 AND overlap >= 0.5 * longest_duration)
+  ), assignments(position, pairs) AS (
+    SELECT 0, '{}'
+    UNION ALL
+    SELECT c.position, CASE WHEN EXISTS (
+      SELECT 1 FROM json_each(a.pairs) WHERE key = c.cloud_id OR value = c.band_id
+    ) THEN a.pairs ELSE json_patch(a.pairs, json_object(c.cloud_id, c.band_id)) END
+    FROM assignments a JOIN candidates c ON c.position = a.position + 1
+  ), matches AS (
+    SELECT key AS cloud_id, value AS band_id
+    FROM assignments, json_each(assignments.pairs)
+    WHERE position = (SELECT COUNT(*) FROM candidates)
+  ), cloud_values AS (
+    SELECT date, id, start, sport_name AS type,
+      ROUND((julianday(end) - julianday(start)) * 1440, 4) AS duration_min,
+      score_state,
+      CASE WHEN score_state = 'SCORED' THEN strain END AS strain,
+      CASE WHEN score_state = 'SCORED' THEN kilojoule END AS kilojoule,
+      CASE WHEN score_state = 'SCORED' THEN max_heart_rate END AS max_hr,
+      CASE WHEN score_state = 'SCORED' THEN average_heart_rate END AS avg_hr,
+      CASE WHEN score_state = 'SCORED' THEN percent_recorded END AS percent_recorded,
+      CASE WHEN score_state = 'SCORED' THEN distance_meter END AS distance_meter,
+      CASE WHEN score_state = 'SCORED' THEN altitude_gain_meter END AS altitude_gain_meter,
+      CASE WHEN score_state = 'SCORED' THEN altitude_change_meter END AS altitude_change_meter,
+      (SELECT json_group_object(key, value / 60000.0) FROM json_each(json_object(
+        'z0', zone_zero_milli, 'z1', zone_one_milli, 'z2', zone_two_milli, 'z3', zone_three_milli,
+        'z4', zone_four_milli, 'z5', zone_five_milli
+      )) WHERE value IS NOT NULL AND score_state = 'SCORED') AS zones
+    FROM cloud_workout
   )
-  SELECT date, 'whoop:' || id AS id, start, sport_name AS type,
-    ROUND((julianday(end) - julianday(start)) * 1440, 4) AS duration_min,
-    strain, kilojoule / 4.184 AS calories, max_heart_rate AS max_hr,
-    (SELECT NULLIF(json_group_object(key, value / 60000.0), '{}') FROM json_each(json_object(
-      'z0', zone_zero_milli, 'z1', zone_one_milli, 'z2', zone_two_milli, 'z3', zone_three_milli,
-      'z4', zone_four_milli, 'z5', zone_five_milli
-    )) WHERE value IS NOT NULL) AS zone_min_json,
-    'whoop_cloud' AS source, score_state, kilojoule, average_heart_rate AS avg_hr,
-    percent_recorded, distance_meter, altitude_gain_meter, altitude_change_meter
-  FROM cloud_workout
+  SELECT c.date, 'whoop:' || c.id AS id, c.start, c.type,
+    COALESCE(c.duration_min, b.duration_min) AS duration_min,
+    COALESCE(c.strain, b.strain) AS strain,
+    COALESCE(c.kilojoule / 4.184, b.calories) AS calories,
+    COALESCE(c.max_hr, b.max_hr) AS max_hr,
+    NULLIF(json_patch(COALESCE(b.zone_min_json, '{}'), c.zones), '{}') AS zone_min_json,
+    'whoop_cloud' AS source, c.score_state, c.kilojoule, c.avg_hr,
+    c.percent_recorded, c.distance_meter, c.altitude_gain_meter, c.altitude_change_meter,
+    (SELECT json_group_array(key) FROM (
+      SELECT key FROM json_each(json_object(
+        'duration_min', c.duration_min IS NULL AND b.duration_min IS NOT NULL,
+        'strain', c.strain IS NULL AND b.strain IS NOT NULL,
+        'calories', c.kilojoule IS NULL AND b.calories IS NOT NULL,
+        'max_hr', c.max_hr IS NULL AND b.max_hr IS NOT NULL
+      )) WHERE value
+      UNION ALL
+      SELECT 'zone_min.' || band_zone.key FROM json_each(b.zone_min_json) band_zone
+      WHERE NOT EXISTS (SELECT 1 FROM json_each(c.zones) WHERE key = band_zone.key)
+      ORDER BY key
+    )) AS band_keys_json
+  FROM cloud_values c
+  LEFT JOIN matches m ON m.cloud_id = c.id
+  LEFT JOIN workout b ON b.id = m.band_id
   UNION ALL
   SELECT date, id, start, type, duration_min, strain, calories, max_hr, zone_min_json,
-    'band' AS source, NULL, NULL, NULL, NULL, NULL, NULL, NULL
-  FROM workout b WHERE NOT EXISTS (SELECT 1 FROM matches WHERE matches.id = b.id AND position = 1)
+    'band' AS source, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+  FROM workout b WHERE NOT EXISTS (SELECT 1 FROM matches WHERE band_id = b.id)
 """
 
 WORKOUT_VIEW = f"CREATE VIEW IF NOT EXISTS effective_workout AS {EFFECTIVE_WORKOUTS}"
