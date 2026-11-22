@@ -19,6 +19,8 @@ EXAMPLE_CALLS = {
     "workouts": {},
     "readiness_today": {},
     "metric_trend": {"key": "rhr"},
+    "strain_day": {"date": "2026-01-12"},
+    "sleep_detail": {"date": "2026-01-12"},
 }
 
 
@@ -36,6 +38,7 @@ def empty_store(tmp_path, monkeypatch):
     db_path = tmp_path / "hub.db"
     monkeypatch.setenv("HUB_DB_PATH", str(db_path))
     monkeypatch.setenv("HUB_TZ", "Etc/UTC")
+    monkeypatch.delenv("HUB_WHOOP_TOKEN_PATH", raising=False)
     freeze_clock(monkeypatch, datetime(2026, 1, 14, 12, tzinfo=UTC))
     connect().close()
     return db_path
@@ -134,6 +137,7 @@ def decode(result):
     content = result.content[0].text
     data = json.loads(content)
     assert "as_of" in data
+    assert data["source"] in {"band", "whoop_cloud"}
     assert content == json.dumps(data, separators=(",", ":"), ensure_ascii=False)
     return data
 
@@ -145,6 +149,10 @@ def test_data_freshness(populated_store):
         "last_band_record_at": AS_OF,
         "newest_day": "2026-01-15",
         "days_stored": 12,
+        "source": "band",
+        "cloud_last_sync_at": None,
+        "token_state": "missing",
+        "token_expires_at": None,
     }
 
 
@@ -154,9 +162,9 @@ def test_sleep_summary_default_and_previous_equal_period(populated_store):
     assert [night["date"] for night in result["nights"]] == [
         "2026-01-08", "2026-01-11", "2026-01-12", "2026-01-13", "2026-01-14",
     ]
-    assert result["nights"][0] == {"date": "2026-01-08", "tst_min": 390}
+    assert result["nights"][0] == {"date": "2026-01-08", "tst_min": 390, "source": "band"}
     assert result["nights"][2] == {
-        "date": "2026-01-12", "tst_min": 421, "deep_min": 80, "rem_min": 90, "light_min": 250,
+        "date": "2026-01-12", "source": "band", "tst_min": 421, "deep_min": 80, "rem_min": 90, "light_min": 250,
         "efficiency": 92.2, "rhr": 56, "rmssd": 50, "resp_rate": 13.5,
     }
     assert result["averages"] == {
@@ -190,11 +198,11 @@ def test_workouts_default_and_inclusive_custom_ranges(populated_store):
     assert result["as_of"] == AS_OF
     assert result["workouts"] == [
         {
-            "date": "2026-01-14", "type": "strength", "duration_min": 45, "calories": 120.1,
+            "date": "2026-01-14", "type": "strength", "source": "band", "duration_min": 45, "calories": 120.1,
             "zone_min": {"z1": 5, "z3": 7},
         },
         {
-            "date": "2026-01-12", "type": "running", "duration_min": 30, "strain": 9.8,
+            "date": "2026-01-12", "type": "running", "source": "band", "duration_min": 30, "strain": 9.8,
             "calories": 250.1, "max_hr": 172, "zone_min": {"z1": 10, "z2": 4},
         },
     ]
@@ -278,19 +286,21 @@ def test_readiness_uses_matching_day_and_30_preceding_days(populated_store):
         "as_of": AS_OF,
         "days": [
             {
-                "date": "2026-01-14", "readiness": 78, "rmssd": 60, "rhr": 52,
+                "date": "2026-01-14", "source": "band", "readiness": 78, "rmssd": 60, "rhr": 52,
                 "baseline_30d": {"readiness": 65, "rmssd": 44, "rhr": 60},
                 "change": {"readiness": 13, "rmssd": 16, "rhr": -8},
             },
         ],
         "strain_yesterday": 8.5,
+        "strain_yesterday_source": "band",
+        "source": "band",
     }
     with closing(connect()) as db, db:
         db.execute("DELETE FROM day_metric WHERE date = '2026-01-14'")
 
     fallback = decode(call("readiness_today"))
     assert fallback["days"] == [
-        {"date": "2026-01-13", "rmssd": 55, "baseline_30d": {"readiness": 45, "rmssd": 41.2, "rhr": 88},
+        {"date": "2026-01-13", "source": "band", "rmssd": 55, "baseline_30d": {"readiness": 45, "rmssd": 41.2, "rhr": 88},
          "change": {"rmssd": 13.8}},
     ]
     assert fallback["strain_yesterday"] == 8.5
@@ -300,17 +310,18 @@ def test_metric_trend_defaults_and_arbitrary_stored_keys(populated_store):
     assert decode(call("metric_trend", key="rhr")) == {
         "as_of": AS_OF,
         "key": "rhr",
+        "source": "band",
         "values": [
-            {"date": "2025-12-16", "value": 60},
-            {"date": "2026-01-11", "value": 59},
-            {"date": "2026-01-12", "value": 56},
-            {"date": "2026-01-14", "value": 52},
+            {"date": "2025-12-16", "value": 60, "source": "band"},
+            {"date": "2026-01-11", "value": 59, "source": "band"},
+            {"date": "2026-01-12", "value": 56, "source": "band"},
+            {"date": "2026-01-14", "value": 52, "source": "band"},
         ],
         "mean": 56.8, "min": 52, "max": 60,
     }
     assert decode(call("metric_trend", key="custom_metric", days=1)) == {
-        "as_of": AS_OF, "key": "custom_metric",
-        "values": [{"date": "2026-01-14", "value": 2.345}],
+        "as_of": AS_OF, "key": "custom_metric", "source": "band",
+        "values": [{"date": "2026-01-14", "value": 2.345, "source": "band"}],
         "mean": 2.345, "min": 2.345, "max": 2.345,
     }
     assert decode(call("metric_trend", key="tst_min", days=1))["mean"] == 451
@@ -431,9 +442,10 @@ def test_sdk_lists_exact_tool_names_and_input_schemas():
     assert set(schemas["metric_trend"]["properties"]) == {"key", "days"}
     assert schemas["metric_trend"]["required"] == ["key"]
     assert schemas["metric_trend"]["properties"]["key"]["type"] == "string"
-    assert set(schemas["sleep_night"]["properties"]) == {"date"}
-    assert schemas["sleep_night"]["required"] == ["date"]
-    assert schemas["sleep_night"]["properties"]["date"]["type"] == "string"
+    for name in ("sleep_night", "strain_day", "sleep_detail"):
+        assert set(schemas[name]["properties"]) == {"date"}
+        assert schemas[name]["required"] == ["date"]
+        assert schemas[name]["properties"]["date"]["type"] == "string"
     assert set(schemas["workouts"]["properties"]) == {"from", "to", "limit", "cursor"}
     assert schemas["workouts"].get("required", []) == []
     for name in ("from", "to", "cursor"):
@@ -442,3 +454,23 @@ def test_sdk_lists_exact_tool_names_and_input_schemas():
         assert {arm["type"] for arm in field["anyOf"]} == {"string", "null"}
     limit = schemas["workouts"]["properties"]["limit"]
     assert (limit["type"], limit["minimum"], limit["maximum"], limit["default"]) == ("integer", 1, 100, 50)
+
+
+def test_pre_cloud_v2_store_remains_readable_without_migration(tmp_path, monkeypatch):
+    from strap_hub.store.db import SCHEMA
+
+    db_path = tmp_path / "v2.db"
+    monkeypatch.setenv("HUB_DB_PATH", str(db_path))
+    freeze_clock(monkeypatch, datetime(2026, 1, 14, 12, tzinfo=UTC))
+    with closing(sqlite3.connect(db_path)) as db, db:
+        db.executescript(SCHEMA)
+        db.executescript("""
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta VALUES ('schema_version', '2');
+            INSERT INTO day_metric (date, key, value, algo_version, received_at)
+            VALUES ('2026-01-12', 'rhr', 52, 1, '2026-01-12T12:00:00Z');
+        """)
+    before = db_path.read_bytes()
+    for name, args in EXAMPLE_CALLS.items():
+        assert decode(call(name, **args))["source"] == "band"
+    assert db_path.read_bytes() == before

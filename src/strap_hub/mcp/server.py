@@ -1,4 +1,4 @@
-"""Serve the hub's six read-only tools over MCP stdio."""
+"""Serve the hub's read-only tools over MCP stdio."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import os
 import sqlite3
 from base64 import b64decode, urlsafe_b64encode
 from collections import defaultdict
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -20,7 +20,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field, StringConstraints
 
+from strap_hub.mcp.cloud import (
+    BAND_WORKOUTS, RECOVERY, SLEEP_TOTALS, has_cloud_schema, metric_table, minutes,
+    sleep_record, token_status,
+)
 from strap_hub.store import connect
+from strap_hub.whoop_cloud.sync import last_sync
 
 mcp = MCPServer("strap-hub")
 READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
@@ -31,7 +36,9 @@ SLEEP_KEYS = (*SLEEP_MINUTES, "efficiency", "rmssd", "rhr", "resp_rate")
 SLEEP_KEY_PARAMS = ", ".join("?" for _ in SLEEP_KEYS)
 DISPLAY_KEYS = {
     *MINUTE_KEYS, *SLEEP_KEYS, "readiness", "strain", "skin_temp_z", "stress", "steps",
-    "calories", "calories_total", "max_hr", "hrr_bpm",
+    "calories", "calories_total", "max_hr", "hrr_bpm", "avg_hr", "kilojoule", "spo2_percentage",
+    "skin_temp_celsius", "sleep_performance_percentage", "sleep_consistency_percentage",
+    "percent_recorded", "distance_meter", "altitude_gain_meter", "altitude_change_meter",
 }
 # Normalize both UTC suffixes to sort fractional timestamps at full precision.
 # Numeric UTC instant, so ordering is correct across offsets and fractional seconds.
@@ -88,8 +95,15 @@ def _as_of(db: sqlite3.Connection) -> str | None:
     return _latest_log_time(db, "last_band_record_at")
 
 
-def _result(as_of: str | None, **fields: object) -> str:
-    return json.dumps({"as_of": as_of, **fields}, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+def _preferred_source(sources: Iterable[str]) -> str:
+    return "whoop_cloud" if "whoop_cloud" in sources else "band"
+
+
+def _result(db: sqlite3.Connection, *, source: str = "band", **fields: object) -> str:
+    as_of = last_sync(db) if source == "whoop_cloud" else _as_of(db)
+    return json.dumps(
+        {"as_of": as_of, "source": source, **fields}, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+    )
 
 
 def _metric_number(key: str, value: float) -> int | float:
@@ -107,23 +121,32 @@ def _metrics(values: Mapping[str, float]) -> dict[str, int | float]:
 
 @mcp.tool(annotations=READ_ONLY, structured_output=False)
 def data_freshness() -> str:
-    """Check when the hub last received data and how recently the band recorded data."""
+    """Check band freshness, the last WHOOP sync, credential state and stored dates."""
     with _read_store() as db:
         last_digest = _latest_log_time(db, "received_at")
+        cloud_sync = last_sync(db)
+        cloud_dates = """
+                   UNION SELECT date FROM cloud_cycle
+                   UNION SELECT date FROM cloud_recovery_day
+                   UNION SELECT date FROM cloud_sleep WHERE date IS NOT NULL
+                   UNION SELECT date FROM cloud_workout
+        """ if has_cloud_schema(db) else ""
         coverage = db.execute(
-            """SELECT MAX(date), COUNT(*) FROM (
+            f"""SELECT MAX(date), COUNT(*) FROM (
                    SELECT date FROM day_metric UNION
                    SELECT date FROM sleep_segment UNION
-                   SELECT date FROM workout
+                   SELECT date FROM workout {cloud_dates}
                )"""
         ).fetchone()
-        as_of = _as_of(db)
         return _result(
-            as_of,
+            db,
+            source="whoop_cloud" if cloud_sync else "band",
             last_digest_at=last_digest,
-            last_band_record_at=as_of,
+            last_band_record_at=_as_of(db),
             newest_day=coverage[0],
             days_stored=coverage[1],
+            cloud_last_sync_at=cloud_sync,
+            **token_status(os.environ["HUB_DB_PATH"]),
         )
 
 
@@ -150,14 +173,16 @@ def sleep_summary(
     start_label = start.isoformat()
     nights: dict[str, dict[str, float]] = defaultdict(dict)
     previous: dict[str, dict[str, float]] = defaultdict(dict)
+    sources: dict[str, dict[str, str]] = defaultdict(dict)
     with _read_store() as db:
         rows = db.execute(
-            f"""SELECT date, key, value FROM day_metric
+            f"""SELECT date, key, value, source FROM {metric_table(db)}
                 WHERE date BETWEEN ? AND ? AND key IN ({SLEEP_KEY_PARAMS})
                 ORDER BY date, key""",
             (previous_start.isoformat(), today.isoformat(), *SLEEP_KEYS),
         )
-        for day, key, value in rows:
+        for day, key, value, source in rows:
+            sources[day][key] = source
             period = nights if day >= start_label else previous
             period[day][key] = value
         averages = _sleep_averages(nights)
@@ -168,48 +193,69 @@ def sleep_summary(
             if key in previous_averages
         }
         return _result(
-            _as_of(db),
-            nights=[{"date": day, **_metrics(metrics)} for day, metrics in nights.items()],
+            db,
+            source=_preferred_source(source for daily in sources.values() for source in daily.values()),
+            nights=[
+                {"date": day, **_metric_provenance(sources[day]), **_metrics(metrics)}
+                for day, metrics in nights.items()
+            ],
             averages=_metrics(averages),
             change=_metrics(change),
         )
 
 
+def _metric_provenance(sources: Mapping[str, str]) -> dict[str, object]:
+    source = _preferred_source(sources.values())
+    result: dict[str, object] = {"source": source}
+    band_keys = sorted(key for key, origin in sources.items() if origin == "band")
+    if source == "whoop_cloud" and band_keys:
+        result["band_keys"] = band_keys
+    return result
+
+
+def _band_night(db: sqlite3.Connection, day: str) -> dict:
+    segments = [
+        (datetime.fromisoformat(start), datetime.fromisoformat(end), stage)
+        for start, end, stage in db.execute(
+            "SELECT start, end, stage FROM sleep_segment WHERE date = ?", (day,)
+        )
+    ]
+    merged: list[tuple[datetime, datetime, str]] = []
+    for start, end, stage in sorted(segments):
+        if merged and merged[-1][2] == stage and start <= merged[-1][1]:
+            last_start, last_end, _ = merged[-1]
+            merged[-1] = (last_start, max(last_end, end), stage)
+        else:
+            merged.append((start, end, stage))
+
+    totals: dict[str, float] = defaultdict(float)
+    for start, end, stage in merged:
+        totals[f"{stage}_min"] += (end - start).total_seconds() / 60
+    if totals:
+        totals["tst_min"] = sum(totals.get(stage, 0) for stage in ("light_min", "deep_min", "rem_min"))
+    return {
+        "segments": [
+            {"start": _utc_label(start), "end": _utc_label(end), "stage": stage}
+            for start, end, stage in merged
+        ],
+        "totals": {key: round(value) for key, value in totals.items()},
+        "wake_count": sum(stage == "wake" for _, _, stage in merged) if merged else None,
+    }
+
+
 @mcp.tool(annotations=READ_ONLY, structured_output=False)
-def sleep_night(date: Annotated[str, ISO_DATE, Field(description="Date the app attributes the night to")]) -> str:
-    """Inspect one night's timeline, minutes by sleep stage and number of wake periods."""
+def sleep_night(date: Annotated[str, ISO_DATE, Field(description="Date the source attributes the night to")]) -> str:
+    """Inspect one night's stage totals and any recorded stage timeline or disturbances."""
     day = _parse_date(date).isoformat()
     with _read_store() as db:
-        segments = [
-            (datetime.fromisoformat(start), datetime.fromisoformat(end), stage)
-            for start, end, stage in db.execute(
-                "SELECT start, end, stage FROM sleep_segment WHERE date = ?", (day,)
-            )
-        ]
-        merged: list[tuple[datetime, datetime, str]] = []
-        for start, end, stage in sorted(segments):
-            if merged and merged[-1][2] == stage and start <= merged[-1][1]:
-                last_start, last_end, _ = merged[-1]
-                merged[-1] = (last_start, max(last_end, end), stage)
-            else:
-                merged.append((start, end, stage))
-
-        minutes: dict[str, float] = defaultdict(float)
-        for start, end, stage in merged:
-            minutes[stage] += (end - start).total_seconds() / 60
-        totals = {f"{stage}_min": round(value) for stage, value in minutes.items()}
-        if minutes:
-            totals["tst_min"] = round(sum(minutes.get(stage, 0) for stage in ("light", "deep", "rem")))
-        return _result(
-            _as_of(db),
-            date=day,
-            segments=[
-                {"start": _utc_label(start), "end": _utc_label(end), "stage": stage}
-                for start, end, stage in merged
-            ],
-            totals=totals,
-            wake_count=sum(stage == "wake" for _, _, stage in merged) if merged else None,
-        )
+        if has_cloud_schema(db):
+            row = db.execute("SELECT * FROM cloud_sleep_night WHERE date = ?", (day,)).fetchone()
+            if row is not None:
+                return _result(
+                    db, source="whoop_cloud", date=day, segments=[], totals=minutes(row, SLEEP_TOTALS),
+                    wake_count=None, disturbance_count=row["disturbance_count"], score_state=row["score_state"],
+                )
+        return _result(db, date=day, **_band_night(db, day))
 
 
 def _utc_label(timestamp: datetime) -> str:
@@ -259,17 +305,20 @@ def workouts(
     bounds = (start.isoformat(), end.isoformat())
     after = _decode_workout_cursor(cursor) if cursor is not None else ()
     cursor_filter = f"AND ({WORKOUT_START}, id) < (?, ?)" if after else ""
+    extras = ("kilojoule", "avg_hr", "percent_recorded", "distance_meter", "altitude_gain_meter",
+              "altitude_change_meter")
     with _read_store() as db:
+        table = "effective_workout" if has_cloud_schema(db) else BAND_WORKOUTS
         page = db.execute(
             f"""SELECT date, {WORKOUT_START} AS start_key, id, type, duration_min, strain, calories,
-                       max_hr, zone_min_json
-                FROM workout WHERE date BETWEEN ? AND ? {cursor_filter}
+                       max_hr, zone_min_json, source, score_state, {', '.join(extras)}
+                FROM {table} WHERE date BETWEEN ? AND ? {cursor_filter}
                 ORDER BY start_key DESC, id DESC LIMIT ?""",
             (*bounds, *after, limit + 1),
         ).fetchall()
         sessions: list[dict[str, object]] = []
         for row in page[:limit]:
-            session: dict[str, object] = {"date": row["date"], "type": row["type"]}
+            session: dict[str, object] = {"date": row["date"], "type": row["type"], "source": row["source"]}
             session.update(_metrics({
                 key: row[key] for key in ("duration_min", "strain", "calories", "max_hr")
                 if row[key] is not None
@@ -277,11 +326,14 @@ def workouts(
             if row["zone_min_json"] is not None:
                 zones = json.loads(row["zone_min_json"])
                 session["zone_min"] = {zone: round(value) for zone, value in zones.items()}
+            if row["score_state"] is not None:
+                session["score_state"] = row["score_state"]
+                session.update(_metrics({key: row[key] for key in extras if row[key] is not None}))
             sessions.append(session)
 
-        count, duration, calories = db.execute(
-            """SELECT COUNT(*), SUM(duration_min), SUM(calories)
-               FROM workout WHERE date BETWEEN ? AND ?""", bounds,
+        count, duration, calories, source = db.execute(
+            f"""SELECT COUNT(*), SUM(duration_min), SUM(calories), MAX(source)
+                FROM {table} WHERE date BETWEEN ? AND ?""", bounds,
         ).fetchone()
         totals: dict[str, object] = {}
         if count:
@@ -291,7 +343,7 @@ def workouts(
             })}
         total_zones: dict[str, float] = defaultdict(float)
         for (raw_zones,) in db.execute(
-            "SELECT zone_min_json FROM workout WHERE date BETWEEN ? AND ? AND zone_min_json IS NOT NULL",
+            f"SELECT zone_min_json FROM {table} WHERE date BETWEEN ? AND ? AND zone_min_json IS NOT NULL",
             bounds,
         ):
             for zone, value in json.loads(raw_zones).items():
@@ -302,7 +354,7 @@ def workouts(
         if len(page) > limit:
             anchor = (page[limit - 1]["start_key"], page[limit - 1]["id"])
             result["next_cursor"] = urlsafe_b64encode(json.dumps(anchor).encode()).decode()
-        return _result(_as_of(db), **result)
+        return _result(db, source=source or "band", **result)
 
 
 @mcp.tool(annotations=READ_ONLY, structured_output=False)
@@ -315,36 +367,44 @@ def readiness_today() -> str:
     today = _today()
     yesterday = today - timedelta(days=1)
     with _read_store() as db:
+        table = metric_table(db)
         day = db.execute(
-            "SELECT MAX(date) FROM day_metric WHERE date <= ? AND key IN ('readiness', 'rmssd', 'rhr')",
+            f"SELECT MAX(date) FROM {table} WHERE date <= ? AND key IN ('readiness', 'rmssd', 'rhr')",
             (today.isoformat(),),
         ).fetchone()[0]
         days = []
+        sources = []
         if day is not None:
-            current = dict(
-                db.execute(
-                    "SELECT key, value FROM day_metric WHERE date = ? AND key IN ('readiness', 'rmssd', 'rhr')",
-                    (day,),
-                )
-            )
+            rows = db.execute(
+                f"SELECT key, value, source FROM {table} WHERE date = ? AND key IN ('readiness', 'rmssd', 'rhr')",
+                (day,),
+            ).fetchall()
+            current = {key: value for key, value, _ in rows}
+            provenance = _metric_provenance({key: source for key, _, source in rows})
             baseline_start = date.fromordinal(max(1, date.fromisoformat(day).toordinal() - 30))
-            baseline = dict(
-                db.execute(
-                    """SELECT key, AVG(value) FROM day_metric
-                       WHERE date >= ? AND date < ? AND key IN ('readiness', 'rmssd', 'rhr') GROUP BY key""",
-                    (baseline_start.isoformat(), day),
-                )
-            )
+            baseline_rows = db.execute(
+                f"""SELECT key, AVG(value), MAX(source) FROM {table}
+                    WHERE date >= ? AND date < ? AND key IN ('readiness', 'rmssd', 'rhr') GROUP BY key""",
+                (baseline_start.isoformat(), day),
+            ).fetchall()
+            baseline = {key: value for key, value, _ in baseline_rows}
+            sources = [*(row[2] for row in rows), *(row[2] for row in baseline_rows)]
             change = {key: current[key] - value for key, value in baseline.items() if key in current}
             days.append(
-                {"date": day, **_metrics(current), "baseline_30d": _metrics(baseline), "change": _metrics(change)}
+                {"date": day, **provenance, **_metrics(current), "baseline_30d": _metrics(baseline),
+                 "change": _metrics(change)}
             )
 
         strain = db.execute(
-            "SELECT value FROM day_metric WHERE date = ? AND key = 'strain'", (yesterday.isoformat(),)
+            f"SELECT value, source FROM {table} WHERE date = ? AND key = 'strain'", (yesterday.isoformat(),)
         ).fetchone()
+        strain_source = {}
+        if strain:
+            sources.append(strain["source"])
+            strain_source["strain_yesterday_source"] = strain["source"]
         return _result(
-            _as_of(db), days=days, strain_yesterday=_metric_number("strain", strain[0]) if strain else None
+            db, source=_preferred_source(sources), days=days,
+            strain_yesterday=_metric_number("strain", strain["value"]) if strain else None, **strain_source,
         )
 
 
@@ -358,10 +418,10 @@ def metric_trend(
     start = today - timedelta(days=days - 1)
     with _read_store() as db:
         rows = db.execute(
-            "SELECT date, value FROM day_metric WHERE date BETWEEN ? AND ? AND key = ? ORDER BY date",
+            f"SELECT date, value, source FROM {metric_table(db)} WHERE date BETWEEN ? AND ? AND key = ? ORDER BY date",
             (start.isoformat(), today.isoformat(), key),
         ).fetchall()
-        values = [value for _, value in rows]
+        values = [value for _, value, _ in rows]
         stats = {}
         if values:
             stats = {
@@ -370,11 +430,98 @@ def metric_trend(
                 "max": _metric_number(key, max(values)),
             }
         return _result(
-            _as_of(db),
+            db,
+            source=_preferred_source(source for _, _, source in rows),
             key=key,
-            values=[{"date": day, "value": _metric_number(key, value)} for day, value in rows],
+            values=[
+                {"date": day, "value": _metric_number(key, value), "source": source}
+                for day, value, source in rows
+            ],
             **stats,
         )
+
+
+@mcp.tool(annotations=READ_ONLY, structured_output=False)
+def strain_day(date: Annotated[str, ISO_DATE, Field(description="Local date of the activity cycle")]) -> str:
+    """Get day strain, energy in kilojoules, heart rates and steps where recorded."""
+    day = _parse_date(date).isoformat()
+    with _read_store() as db:
+        rows = db.execute(
+            f"""SELECT key, value, source FROM {metric_table(db)} WHERE date = ?
+                AND key IN ('strain', 'steps', 'kilojoule', 'avg_hr', 'max_hr', 'calories_total')""",
+            (day,),
+        )
+        metrics = {}
+        origins = {}
+        for key, value, source in rows:
+            metrics[key] = value
+            origins[key] = source
+        if "kilojoule" not in metrics and "calories_total" in metrics:
+            metrics["kilojoule"] = metrics["calories_total"] * 4.184
+            origins["kilojoule"] = origins["calories_total"]
+        metrics.pop("calories_total", None)
+        origins.pop("calories_total", None)
+        extra = {}
+        if has_cloud_schema(db):
+            cycle = db.execute("SELECT score_state FROM cloud_cycle_day WHERE date = ?", (day,)).fetchone()
+            if cycle is not None:
+                extra["score_state"] = cycle["score_state"]
+                origins["score_state"] = "whoop_cloud"
+        return _result(db, date=day, **_metric_provenance(origins), **_metrics(metrics), **extra)
+
+
+@mcp.tool(annotations=READ_ONLY, structured_output=False)
+def sleep_detail(date: Annotated[str, ISO_DATE, Field(description="Local wake date")]) -> str:
+    """Get sleep stages, sleep need, performance, respiratory rate, naps and recovery."""
+    day = _parse_date(date).isoformat()
+    with _read_store() as db:
+        sleep = None
+        recovery = None
+        naps = []
+        if has_cloud_schema(db):
+            row = db.execute("SELECT * FROM cloud_sleep_night WHERE date = ?", (day,)).fetchone()
+            if row is not None:
+                sleep = sleep_record(row)
+            naps = [
+                sleep_record(row) for row in db.execute(
+                    """SELECT *, total_light_sleep_time_milli + total_slow_wave_sleep_time_milli
+                                     + total_rem_sleep_time_milli AS total_sleep_milli
+                       FROM cloud_sleep WHERE date = ? AND nap = 1 ORDER BY end, id""",
+                    (day,),
+                )
+            ]
+            row = db.execute("SELECT * FROM cloud_recovery_day WHERE date = ?", (day,)).fetchone()
+            if row is not None:
+                recovery = {
+                    "source": "whoop_cloud",
+                    "score_state": row["score_state"],
+                    **_metrics({key: row[col] for key, col in RECOVERY.items() if row[col] is not None}),
+                }
+                if row["user_calibrating"] is not None:
+                    recovery["user_calibrating"] = bool(row["user_calibrating"])
+
+        if sleep is None or recovery is None:
+            band = dict(db.execute(
+                f"""SELECT key, value FROM day_metric WHERE date = ?
+                    AND key IN ({SLEEP_KEY_PARAMS}, 'readiness', 'skin_temp_z', 'nap_min')""",
+                (day, *SLEEP_KEYS),
+            ))
+            if sleep is None:
+                night = _band_night(db, day)
+                totals = {key: band[key] for key in (*SLEEP_MINUTES, "nap_min") if key in band}
+                totals.update(night["totals"])
+                metrics = _metrics({key: band[key] for key in ("efficiency", "resp_rate") if key in band})
+                if totals or metrics:
+                    sleep = {"source": "band", "totals": _metrics(totals), **metrics}
+            if recovery is None:
+                metrics = _metrics({
+                    key: band[key] for key in ("readiness", "rhr", "rmssd", "skin_temp_z") if key in band
+                })
+                if metrics:
+                    recovery = {"source": "band", **metrics}
+
+        source = _preferred_source(part["source"] for part in (sleep, recovery, *naps) if part is not None)
+        return _result(db, source=source, date=day, sleep=sleep, recovery=recovery, naps=naps)
 
 
 def main() -> None:

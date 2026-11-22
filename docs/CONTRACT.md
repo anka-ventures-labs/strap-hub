@@ -174,20 +174,39 @@ and subject to the conflict rules in section 3.
 
 ## 5. Agent tools (MCP, stdio, read-only)
 
-All tools read the store only. Dates are `YYYY-MM-DD`; ranges are inclusive. Every
-result includes `"as_of"` (latest `last_band_record_at`) so the agent can say how
-fresh the data is. Results stay small: no raw per-second data.
+Tools read the local store and credential status. Dates use `YYYY-MM-DD` and
+ranges are inclusive. Every result includes `source` and `as_of`. Cloud records
+use the last successful sync time. Band records use the latest known band record
+time. A result containing both sources uses `whoop_cloud` at the top level.
+Range rows identify their own source. Raw provider records stay in the database.
 
 | Tool | Args | Returns |
 |---|---|---|
-| `data_freshness` | — | last digest time, last band record time, newest day with data, days stored |
+| `data_freshness` | — | last digest and band record times, newest day with data, count of distinct stored dates, `cloud_last_sync_at`, local `token_state` and `token_expires_at` |
 | `sleep_summary` | `days` (1–90, default 7) | per night: total, deep, REM, light minutes, efficiency, HRV, RHR, resp rate; plus averages and the change vs the previous equal period |
-| `sleep_night` | `date` | the night's stage segments merged into a compact timeline, totals, wake count |
+| `sleep_night` | `date` | stage totals, merged timeline and wake count for band sleep, or score state and disturbance count for cloud sleep |
 | `workouts` | `from`, `to` (default: this week, Monday to today), `limit` (1–100, default 50), `cursor` (opaque, optional) | up to `limit` workouts (date, type, duration, strain, calories, max HR, zone minutes), newest first; `next_cursor` when more remain; `totals` always cover the whole requested range |
 | `readiness_today` | — | today's (or latest) readiness, HRV and RHR, each vs its 30-day baseline (the 30 calendar days before the reported day), strain yesterday |
-| `metric_trend` | `key`, `days` (1–365, default 30) | daily values for one `day_metric` key, plus mean, min, max. Known keys are rounded for display; unknown keys keep stored precision |
+| `metric_trend` | `key`, `days` (1–365, default 30) | daily values for one metric key, plus mean, min, max. Known keys are rounded for display; unknown keys keep stored precision |
+| `strain_day` | `date` | strain, `kilojoule`, `avg_hr`, `max_hr`, `steps`, and cloud cycle score state when available |
+| `sleep_detail` | `date` | `sleep`, `recovery`, and `naps` with source labels. Cloud sleep includes stage minutes, four `sleep_need_min` components, performance, consistency, efficiency, and respiratory rate. Cloud recovery includes readiness, RMSSD, resting HR, SpO₂, skin temperature, and calibration where recorded |
 
-Errors are explicit: no data in range returns an empty list with `as_of`, never a guess.
+Cloud values take precedence for matching dates and metric keys. Missing values
+fall back to recorded band metrics. A date with any cloud workout uses the cloud
+workout list for that day, so overlapping provider and band sessions appear once.
+Cloud workout totals convert kilojoules to kcal at 4.184 kJ per kcal. When only
+band total kcal exists, `strain_day` uses that conversion for kilojoules.
+
+Cloud main sleep supplies the stage totals in `sleep_night`, with `segments: []`
+and `wake_count: null`. `disturbance_count` carries the WHOOP count when available.
+`sleep_detail` selects main sleep and recovery independently and includes
+cloud naps separately with `nap: true`. A missing record uses the available band
+record for that component. Band fallback for individual metrics on a cloud day
+is identified by `band_keys`. Period averages and baselines can include both
+sources. A range with no matching data returns an empty list with freshness.
+
+`token_state` values are `missing`, `unreadable`, `expired`, and `ready`. They reflect
+the local file and access-token expiry. Access is confirmed when a sync succeeds.
 
 
 ## 6. WHOOP Developer API v2

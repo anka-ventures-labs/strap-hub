@@ -334,7 +334,7 @@ def test_equal_and_higher_version_backups_fill_gaps_without_replacing_pushed_dat
                 "SELECT stage, algo_version, source FROM sleep_segment ORDER BY start"
             )] == ([("light", 125, "push"), ("deep", 125, "push")] if segments == "populated" else [])
             assert tuple(db.execute("SELECT type, source FROM workout").fetchone()) == ("cycling", "push")
-            assert json.loads(server.metric_trend("rhr"))["values"] == [{"date": "2026-01-02", "value": 53}]
+            assert json.loads(server.metric_trend("rhr"))["values"] == [{"date": "2026-01-02", "value": 53, "source": "band"}]
 
 
 def test_imports_only_replace_imports_at_higher_version_and_equal_push_claims_rows(hub, tmp_path):

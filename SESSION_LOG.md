@@ -176,3 +176,16 @@
 - Added local auth, sync, status and revoke commands plus the 15-minute
   LaunchAgent template. The fixture exercises authorization through revocation.
   Verify dashboard redirect support and first live sync during owner setup.
+
+## 2026-11-22 W6 MCP assembly
+
+- Added `strain_day` and `sleep_detail`. Existing MCP calls keep their input
+  schemas and now read cloud data with band fallback and source labels.
+  Workouts choose one list for each date. Pending cloud sleep remains visible
+  with its score state, and cloud sleep reports aggregate stages and disturbances.
+- Verified mixed-source precedence, UTC offset and wake-day mapping, freshness,
+  workout pagination, read-only v2 compatibility, and band ingest and import.
+  The full pytest suite passed on Python 3.12.14 and 3.14.9 with 86 tests each.
+  The CLI help and LaunchAgent template also passed local checks.
+- Owner setup still needs browser consent, a first live sync and verification
+  of the scheduled job, in that order.
