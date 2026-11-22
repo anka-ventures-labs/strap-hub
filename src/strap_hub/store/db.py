@@ -61,6 +61,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             columns = {column["name"] for column in conn.execute("PRAGMA table_info(cloud_recovery)")}
             if "sleep_start" not in columns:
                 conn.execute("ALTER TABLE cloud_recovery ADD COLUMN sleep_start TEXT")
+            workout_columns = {column["name"] for column in conn.execute("PRAGMA table_info(effective_workout)")}
+            if "band_keys_json" not in workout_columns:
                 conn.execute("DROP VIEW IF EXISTS effective_workout")
                 conn.execute(WORKOUT_VIEW)
             return

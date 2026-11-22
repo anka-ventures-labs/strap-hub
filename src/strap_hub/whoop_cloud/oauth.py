@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import math
 import os
 import secrets
@@ -11,7 +12,7 @@ import stat
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hmac import compare_digest
 from pathlib import Path
@@ -27,6 +28,7 @@ SCOPES = ("read:recovery", "read:cycles", "read:workout", "read:sleep", "read:pr
           "read:body_measurement", "offline")
 TOKEN_SIDECARS = (".lock", ".staged", ".promote")
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+logger = logging.getLogger(__name__)
 
 
 class WhoopError(ValueError):
@@ -69,17 +71,20 @@ def parse_redirect_uri(uri: str) -> SplitResult:
 
 def token_path(db_path: str | Path | None) -> Path:
     custom = os.environ.get("HUB_WHOOP_TOKEN_PATH")
-    db = Path(db_path).expanduser().resolve() if db_path else None
+    db = Path(db_path).expanduser().absolute() if db_path else None
     if custom:
-        path = Path(custom).expanduser()
-        path = path.parent.resolve() / path.name
+        path = Path(custom).expanduser().absolute()
     elif db is not None:
         path = db.with_name(db.name + ".whoop-token.json")
     else:
         raise WhoopError("Set HUB_DB_PATH or HUB_WHOOP_TOKEN_PATH")
 
     if db is not None:
-        store_files = {db.with_name(db.name + suffix) for suffix in ("", "-wal", "-shm", "-journal")}
+        store_files = {
+            target.with_name(target.name + suffix)
+            for target in (Path(os.path.abspath(db)), db.resolve())
+            for suffix in ("", "-wal", "-shm", "-journal")
+        }
         if store_files.intersection(path.with_name(path.name + suffix) for suffix in ("", *TOKEN_SIDECARS)):
             raise WhoopError("WHOOP credentials must use a separate file from the hub store")
     return path
@@ -90,6 +95,8 @@ class Tokens:
     access_token: str
     refresh_token: str
     expires_at: float
+    user_id: int | None = None
+    generation: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -98,8 +105,14 @@ class Tokens:
                     for value in (self.access_token, self.refresh_token))
             or type(self.expires_at) not in (float, int)
             or not 0 < self.expires_at < 253402300799
+            or (self.user_id is not None and not valid_user_id(self.user_id))
+            or type(self.generation) is not int or self.generation < 0
         ):
             raise WhoopError("WHOOP token data is invalid")
+
+
+def valid_user_id(value: object) -> bool:
+    return type(value) is int and value > 0
 
 
 def _open_private(directory: int, name: str, flags: int) -> int:
@@ -115,7 +128,10 @@ def _read_tokens(directory: int, name: str) -> Tokens | None:
     try:
         with os.fdopen(_open_private(directory, name, os.O_RDONLY), encoding="utf-8") as stream:
             values = json.load(stream)
-        return Tokens(values["access_token"], values["refresh_token"], values["expires_at"])
+        return Tokens(
+            values["access_token"], values["refresh_token"], values["expires_at"],
+            values.get("user_id"), values.get("generation", 0),
+        )
     except FileNotFoundError:
         return None
     except (ValueError, TypeError, KeyError):
@@ -132,14 +148,28 @@ class LockedTokens:
         return self.name + ".staged"
 
     def load(self) -> Tokens | None:
+        live = _read_tokens(self.directory, self.name)
         staged = _read_tokens(self.directory, self.staging)
-        if staged is not None:
-            # The previous writer may have failed before syncing the staged file.
-            with os.fdopen(_open_private(self.directory, self.staging, os.O_RDONLY), "rb") as stream:
-                os.fsync(stream.fileno())
-            self._promote()
-            return staged
-        return _read_tokens(self.directory, self.name)
+        if staged is None:
+            return live
+        if live is not None and staged.generation <= live.generation:
+            if staged != live:
+                logger.warning("Discarding a WHOOP token stage without a newer generation")
+            # Make the live rename durable before removing its recovery link.
+            os.fsync(self.directory)
+            self._clear_stage()
+            return live
+        # The previous writer may have failed before syncing the staged file.
+        with os.fdopen(_open_private(self.directory, self.staging, os.O_RDONLY), "rb") as stream:
+            os.fsync(stream.fileno())
+        self._promote()
+        return staged
+
+    def _clear_stage(self) -> None:
+        with suppress(FileNotFoundError):
+            os.unlink(self.name + ".promote", dir_fd=self.directory)
+        os.unlink(self.staging, dir_fd=self.directory)
+        os.fsync(self.directory)
 
     def _promote(self) -> None:
         # Keep a link to the staged pair until the replacement is durable.
@@ -152,21 +182,24 @@ class LockedTokens:
         os.replace(promotion, self.name, src_dir_fd=self.directory, dst_dir_fd=self.directory)
         os.fsync(self.directory)
         # Replacing an existing link to the same inode can be a no-op.
-        with suppress(FileNotFoundError):
-            os.unlink(promotion, dir_fd=self.directory)
-        os.unlink(self.staging, dir_fd=self.directory)
+        self._clear_stage()
 
-    def save(self, tokens: Tokens) -> None:
+    def save(self, tokens: Tokens) -> Tokens:
+        live = self.load()
+        tokens = replace(tokens, generation=live.generation + 1 if live else 1)
         fd = _open_private(self.directory, self.staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump({
                 "access_token": tokens.access_token,
                 "refresh_token": tokens.refresh_token,
                 "expires_at": tokens.expires_at,
+                "user_id": tokens.user_id,
+                "generation": tokens.generation,
             }, stream)
             stream.flush()
             os.fsync(fd)
         self._promote()
+        return tokens
 
     def remove(self) -> None:
         os.unlink(self.name, dir_fd=self.directory)
@@ -179,7 +212,10 @@ class TokenStore:
 
     @contextmanager
     def _directory(self, *, create: bool) -> Iterator[int]:
-        parts = Path(os.path.abspath(self.path.parent)).parts
+        path = self.path.absolute()
+        if ".." in path.parts or not path.name:
+            raise WhoopError("WHOOP credential path must name a file without parent traversals")
+        parts = path.parent.parts
         uid = os.getuid()
         directory = os.open(parts[0], DIRECTORY_FLAGS)
         try:
@@ -219,9 +255,10 @@ class TokenStore:
         try:
             with self._directory(create=False) as directory:
                 # Status only inspects local files. OAuth promotes staging under the lock.
-                tokens = _read_tokens(directory, self.path.name + ".staged") or _read_tokens(
-                    directory, self.path.name,
-                )
+                tokens = _read_tokens(directory, self.path.name)
+                staged = _read_tokens(directory, self.path.name + ".staged")
+                if staged is not None and (tokens is None or staged.generation > tokens.generation):
+                    tokens = staged
         except FileNotFoundError:
             tokens = None
         except (OSError, WhoopError):
@@ -269,7 +306,7 @@ class OAuth:
     store: TokenStore
     http: httpx.Client
 
-    def _token_request(self, body: str, credentials: LockedTokens) -> Tokens:
+    def _token_request(self, body: str, *, user_id: int | None = None) -> Tokens:
         started_at = time.time()
         try:
             response = self.http.post(
@@ -286,22 +323,19 @@ class OAuth:
             seconds = float(values["expires_in"])
             if not math.isfinite(seconds) or seconds <= 0:
                 raise ValueError
-            tokens = Tokens(values["access_token"], values["refresh_token"], started_at + seconds)
+            return Tokens(values["access_token"], values["refresh_token"], started_at + seconds, user_id)
         except (ValueError, TypeError, KeyError, OverflowError):
             raise WhoopError("WHOOP returned invalid token data. Authorize with the offline scope.") from None
 
-        # Refresh requests are never retried. Persist both rotated values before returning.
-        credentials.save(tokens)
-        return tokens
-
-    def exchange(self, code: str) -> None:
+    @contextmanager
+    def exchange(self, code: str) -> Iterator[TokenSession]:
         client = WebApplicationClient(self.config.client_id)
         body = client.prepare_request_body(
             code=code, redirect_uri=self.config.redirect_uri, client_secret=self.config.client_secret,
         )
         with self.store.locked() as credentials:
             credentials.load()  # Verify the destination before consuming a one-use code.
-            self._token_request(body, credentials)
+            yield TokenSession(self, credentials, self._token_request(body))
 
     @contextmanager
     def session(self) -> Iterator[TokenSession]:
@@ -334,5 +368,6 @@ class TokenSession:
                 refresh_token=current.refresh_token, scope="offline",
                 client_id=config.client_id, client_secret=config.client_secret,
             )
-            self.tokens = self.oauth._token_request(body, self.credentials)
+            # Refresh requests are never retried. Persist both rotated values before returning.
+            self.tokens = self.credentials.save(self.oauth._token_request(body, user_id=current.user_id))
         return self.tokens.access_token

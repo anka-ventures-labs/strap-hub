@@ -17,7 +17,7 @@ from strap_hub.whoop_cloud.oauth import (
     OAuth, OAuthConfig, TokenStore, WhoopError, authorization_url, callback_code, new_state,
     parse_redirect_uri, token_path,
 )
-from strap_hub.whoop_cloud.sync import store_status, sync, sync_window
+from strap_hub.whoop_cloud.sync import authorize, store_status, sync, sync_window
 
 CALLBACK_WAIT_SECONDS = 180
 
@@ -34,6 +34,8 @@ def _iso_date(value: str) -> date:
 def register(commands: argparse._SubParsersAction) -> None:
     auth = commands.add_parser("whoop-auth", help="authorize the hub with WHOOP")
     auth.add_argument("--paste", action="store_true", help="paste the redirect URL in a hidden prompt")
+    auth.add_argument("--replace-account", action="store_true",
+                      help="clear existing cloud history and sync metadata when switching WHOOP accounts")
     poll = commands.add_parser("whoop-sync", help="fetch WHOOP v2 records")
     poll.add_argument("--since", type=_iso_date, metavar="DATE",
                       help="backfill and reconcile from this UTC date (YYYY-MM-DD)")
@@ -88,7 +90,7 @@ def _loopback_code(config: OAuthConfig, auth_url: str, state: str) -> str:
     return code
 
 
-def _authorize(oauth: OAuth, *, paste: bool) -> None:
+def _authorize(db_path: str | None, oauth: OAuth, *, paste: bool, replace_account: bool) -> None:
     state = new_state()
     url = authorization_url(oauth.config, state)
     if paste or urlsplit(oauth.config.redirect_uri).scheme != "http":
@@ -102,13 +104,15 @@ def _authorize(oauth: OAuth, *, paste: bool) -> None:
         code = callback_code(callback.strip(), oauth.config.redirect_uri, state)
     else:
         code = _loopback_code(oauth.config, url, state)
-    oauth.exchange(code)
+    authorize(db_path, oauth, code, replace_account=replace_account)
     print("WHOOP authorization saved.")
 
 
 def run(args: argparse.Namespace, db_path: str | None) -> None:
     if not db_path and args.command in {"whoop-sync", "whoop-status"}:
         raise WhoopError("HUB_DB_PATH is required")
+    if not db_path and args.command == "whoop-auth" and args.replace_account:
+        raise WhoopError("HUB_DB_PATH is required with --replace-account")
     if args.command == "whoop-sync" and args.dry_run:
         window = sync_window(db_path, args.since)
         print(json.dumps({"start": window.start, "end": window.end}))
@@ -123,7 +127,7 @@ def run(args: argparse.Namespace, db_path: str | None) -> None:
     with http_client() as http:
         oauth = OAuth(config, store, http)
         if args.command == "whoop-auth":
-            _authorize(oauth, paste=args.paste)
+            _authorize(db_path, oauth, paste=args.paste, replace_account=args.replace_account)
         elif args.command == "whoop-sync":
             print(json.dumps(sync(db_path, oauth, args.since)))
         elif args.command == "whoop-revoke":

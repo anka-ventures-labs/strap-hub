@@ -217,3 +217,26 @@
   upgrade also refreshes the stored workout view. The final locked offline
   suite passed on Python 3.14.9 (95 tests, 3.60 s) and Python 3.12.14
   (95 tests, 3.61 s).
+
+## 2026-11-22 W6 round 3
+
+- Authorization saves the WHOOP basic profile's numeric account ID with the
+  grant. Sync verifies the grant against the profile and the database before
+  fetching collections, and rechecks the profile after a mid-sync rotation.
+  An empty response from another verified account cannot advance the cursor
+  or delete rows. Credentials created before account binding require a new
+  authorization.
+- `whoop-auth --replace-account` saves the verified grant and resets cloud
+  history and cursors for the previous account in one database transaction.
+  If SQLite cannot commit after token promotion, the old database binding
+  still prevents sync with the new grant. Band and digest history are preserved.
+- The workout projection assigns candidate pairs in a stable order with
+  one assignment per workout. It fills missing scored fields and individual
+  zone minutes from the matched band session and exposes them in `band_keys`.
+  Range totals and pagination use the merged workouts.
+- Credential staging now uses a generation written under the token lock.
+  Recovery promotes newer pairs, and the directory walk rejects configured
+  symlinks even if the link is retargeted.
+- The full locked offline suites passed on Python 3.14.9 (107 tests, 2.87 s)
+  and Python 3.12.14 (107 tests, 2.96 s). All WHOOP API requests used synthetic
+  transports.

@@ -158,13 +158,14 @@ retry returns the same acceptance response and keeps the original receipt time.
    checkout. The default adds `.whoop-token.json` to `HUB_DB_PATH`. The rotating
    token file, lock and any staging files are owner-only (mode 600). Their
    directory must belong to the service user and disallow group and world writes.
-   The CLI creates a missing directory with mode 700 and refuses parent paths
-   where another user could replace it. Keep the lock file in place while the
+   The CLI creates a missing directory with mode 700. Use a physical path
+   without symlink components or `..`. The CLI refuses parent directories
+   where another user could replace an entry. Keep the lock file in place while the
    app is configured. If token promotion fails after a refresh, fix the
-   filesystem issue and run the sync again. It recovers a saved token pair from
-   staging before making a request. If WHOOP rotated the pair and no valid
-   replacement reached disk, stop the sync job and authorize again after
-   clearing any incomplete staging file.
+   filesystem issue and run the sync again. It recovers a newer saved token pair
+   from staging before making a request and discards stale staging files.
+   If WHOOP rotated the pair and no valid replacement reached disk, stop the
+   sync job and authorize again after clearing any incomplete staging file.
 3. From the hub checkout, run authorization once. Open the printed URL in a
    browser and grant access. For an HTTPS or `whoop://` redirect, paste the
    complete redirected URL at the hidden prompt, even if the browser reports a
@@ -183,13 +184,27 @@ retry returns the same acceptance response and keeps the original receipt time.
 
    Set `HUB_ENV_FILE` to the absolute path of the private config file from the
    install step. `whoop-status` reports local token state, expiry, last successful
-   sync, and stored row counts. The first sync loads the trailing window. Later
-   polls overlap the last successful cutoff by `WHOOP_SYNC_WINDOW_DAYS`, including
+   sync, and stored row counts. Authorization binds the token pair to the
+   numeric ID from the WHOOP basic profile. Run `whoop-auth` again once if
+   upgrading credentials saved before account binding. Each sync verifies
+   the WHOOP profile before collecting or reconciling data. The first sync
+   loads the trailing window. Later polls overlap the last successful cutoff
+   by `WHOOP_SYNC_WINDOW_DAYS`, including
    any time the job was offline. After all pages succeed, the hub removes WHOOP
    records that start in the sync window and are missing from the response.
    Use `whoop-sync --since YYYY-MM-DD` to backfill and reconcile older deletions
    from midnight UTC on that date. Add `--dry-run` to print the planned window
    without contacting WHOOP or changing the database or tokens.
+
+   To keep history for a different WHOOP account, use a separate `HUB_DB_PATH`
+   and token location. To replace the cloud history in the configured store,
+   run the following command and authorize the new account. It clears cloud
+   rows and resets the sync cursor for an old or unknown account. Band records
+   stay in the store. Run `whoop-sync` afterward to populate the new account.
+
+   ```sh
+   uv run --no-sync --env-file "$HUB_ENV_FILE" strap-hub whoop-auth --paste --replace-account
+   ```
 
    Marking a workout private in the phone app only affects the band's copy.
    Delete or hide the separate cloud copy in WHOOP if needed. A successful

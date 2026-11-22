@@ -334,7 +334,7 @@ def workouts(
         table = f"({EFFECTIVE_WORKOUTS})" if has_cloud_schema(db) else BAND_WORKOUTS
         page = db.execute(
             f"""SELECT date, {WORKOUT_START} AS start_key, id, type, duration_min, strain, calories,
-                       max_hr, zone_min_json, source, score_state, {', '.join(extras)}
+                       max_hr, zone_min_json, source, score_state, band_keys_json, {', '.join(extras)}
                 FROM {table} WHERE date BETWEEN ? AND ? {cursor_filter}
                 ORDER BY start_key DESC, id DESC LIMIT ?""",
             (*bounds, *after, limit + 1),
@@ -352,6 +352,9 @@ def workouts(
             if row["score_state"] is not None:
                 session["score_state"] = row["score_state"]
                 session.update(_metrics({key: row[key] for key in extras if row[key] is not None}))
+                band_keys = json.loads(row["band_keys_json"])
+                if band_keys:
+                    session["band_keys"] = band_keys
             sessions.append(session)
 
         count, duration, calories, source = db.execute(
