@@ -31,7 +31,7 @@ live for the owner (with evidence) or explicitly declined (with the reason).
 | W3a | strap-edge: digest builder, outbox, push after sync (no UI) | Built (0da9409, 02e1cd4), draft PR anka-ventures-labs/strap-edge#1; not compiled | Owner: enable Actions on the fork (web-only button), then CI |
 | W3b | strap-edge: hub settings screen, rename to Strap Edge, new icon, OpenStrap credit (Opus) | In progress (separate T3 thread, branch feat/hub-settings-rebrand on top of feat/hub-push) | — |
 | W3c | strap-edge: own bundle ID and signing with the owner's Apple developer team, device build, install on iPhone | Planned | W3a/W3b CI green; disk space or build volume for an iOS build |
-| W6 | WHOOP cloud source, official v2 OAuth and poller, SQLite storage, MCP tools for strain, steps and sleep detail | Implemented and locally verified | Register redirect, authorize once, and verify the first live sync before enabling the job |
+| W6 | WHOOP cloud source: official API v2 OAuth (offline), poller, store, MCP tools for strain/steps and sleep detail (Sol) | Built and reviewed (2 Sol review rounds; round-3 fixes verified by the coordinator against the reviewer's exact scenarios); PR open | CI, merge, deploy, owner's one-time consent |
 | W4 | Home Assistant publisher (mirror cloud-integration metrics; asleep helper) | Planned; dedicated HA user and token created on the hub machine (outside Git) | W1 |
 | Q1 | Identify what currently sets HA's asleep helper (outside HA) | Planned | — |
 | W5 | Hermes morning briefing via Hermes cron | Planned | W2 |
