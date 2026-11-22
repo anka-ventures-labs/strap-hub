@@ -212,3 +212,8 @@
   apply to band records. Manage the separate cloud copy in WHOOP.
 - Full locked pytest suites passed offline on Python 3.14.9 (94 tests,
   2.28 s) and Python 3.12.14 (94 tests, 4.14 s).
+- Recovery retains the last known linked sleep start so it can be reconciled
+  after sleep and recovery disappear in separate polls. The writable v3
+  upgrade also refreshes the stored workout view. The final locked offline
+  suite passed on Python 3.14.9 (95 tests, 3.60 s) and Python 3.12.14
+  (95 tests, 3.61 s).

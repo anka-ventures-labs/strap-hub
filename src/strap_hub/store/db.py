@@ -9,7 +9,7 @@ import sqlite3
 from stat import S_ISREG
 from pathlib import Path
 
-from strap_hub.store.cloud import CLOUD_SCHEMA
+from strap_hub.store.cloud import CLOUD_SCHEMA, WORKOUT_VIEW
 
 SCHEMA_VERSION = 3
 
@@ -57,6 +57,12 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     if row is not None:
         if row[0] == str(SCHEMA_VERSION):
+            # Early v3 stores did not retain the linked sleep's start on recovery.
+            columns = {column["name"] for column in conn.execute("PRAGMA table_info(cloud_recovery)")}
+            if "sleep_start" not in columns:
+                conn.execute("ALTER TABLE cloud_recovery ADD COLUMN sleep_start TEXT")
+                conn.execute("DROP VIEW IF EXISTS effective_workout")
+                conn.execute(WORKOUT_VIEW)
             return
         if row[0] not in ("1", "2"):
             raise sqlite3.DatabaseError("Unsupported hub store schema version")

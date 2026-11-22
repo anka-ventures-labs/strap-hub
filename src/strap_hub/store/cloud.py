@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS cloud_cycle (
   strain REAL, kilojoule REAL, average_heart_rate INTEGER, max_heart_rate INTEGER,
   raw_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS cloud_recovery (
-  cycle_id INTEGER PRIMARY KEY, sleep_id TEXT NOT NULL, score_state TEXT NOT NULL,
+  cycle_id INTEGER PRIMARY KEY, sleep_id TEXT NOT NULL, sleep_start TEXT, score_state TEXT NOT NULL,
   recovery_score REAL, resting_heart_rate REAL, hrv_rmssd_milli REAL,
   spo2_percentage REAL, skin_temp_celsius REAL, user_calibrating INTEGER,
   raw_json TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -133,4 +133,5 @@ EFFECTIVE_WORKOUTS = """
   FROM workout b WHERE NOT EXISTS (SELECT 1 FROM matches WHERE matches.id = b.id AND position = 1)
 """
 
-CLOUD_SCHEMA += f"CREATE VIEW IF NOT EXISTS effective_workout AS {EFFECTIVE_WORKOUTS};"
+WORKOUT_VIEW = f"CREATE VIEW IF NOT EXISTS effective_workout AS {EFFECTIVE_WORKOUTS}"
+CLOUD_SCHEMA += f"{WORKOUT_VIEW};"

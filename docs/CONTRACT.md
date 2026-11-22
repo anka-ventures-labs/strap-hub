@@ -224,7 +224,7 @@ copy visible. Delete or hide that copy in WHOOP if needed.
 | Table | Key | Stored fields |
 |---|---|---|
 | `cloud_cycle` | WHOOP integer `id` | Local date, start/end, offset, score state, nullable `step_count`, strain, kilojoules, average and maximum HR. |
-| `cloud_recovery` | Integer `cycle_id` | Sleep UUID, score state, recovery score, resting HR, RMSSD in ms, SpO₂ percent, skin temperature in °C, calibration flag. |
+| `cloud_recovery` | Integer `cycle_id` | Sleep UUID and last known sleep start, score state, recovery score, resting HR, RMSSD in ms, SpO₂ percent, skin temperature in °C, calibration flag. |
 | `cloud_sleep` | Sleep UUID `id` | Wake date, start/end, offset, nap flag, score state, stage and need durations in ms, cycle and disturbance counts, respiratory rate and sleep performance, consistency and efficiency percentages. |
 | `cloud_workout` | Workout UUID `id` | Local date, start/end, offset, sport fields, score state, strain, HR, kilojoules, percent recorded, distance and altitude in meters, zone zero through five durations in ms. |
 
@@ -244,9 +244,10 @@ same local date, the latest start or wake time wins, respectively.
 A successful poll commits all four collections and `meta.whoop_last_sync_at`
 together. Once every page succeeds, the hub removes cloud rows missing from the
 response whose UTC starts are in the window (start inclusive, end exclusive).
-Recovery uses the linked sleep's start. If that start is unavailable, the
-recovery row has no known window membership and is retained. A failed or
-incomplete fetch leaves the records and sync timestamps intact.
+Recovery uses the linked sleep's last known start, including after the sleep
+disappears. A recovery row whose sleep start has never been observed is
+retained. A failed or incomplete fetch leaves the records and sync timestamps
+intact.
 `meta.whoop_sync_end` records the UTC cutoff for the next incremental window.
 An explicit backfill reconciles its entire window. A backfill starting after
 the incremental window leaves the cutoff in place so the next poll can cover
