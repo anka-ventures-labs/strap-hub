@@ -9,7 +9,9 @@ import sqlite3
 from stat import S_ISREG
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+from strap_hub.store.cloud import CLOUD_SCHEMA
+
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS day_metric (
@@ -56,12 +58,13 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     if row is not None:
         if row[0] == str(SCHEMA_VERSION):
             return
-        if row[0] != "1":
+        if row[0] not in ("1", "2"):
             raise sqlite3.DatabaseError("Unsupported hub store schema version")
-        for table in ("day_metric", "sleep_segment", "workout"):
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN source TEXT NOT NULL DEFAULT 'push'")
+        if row[0] == "1":
+            for table in ("day_metric", "sleep_segment", "workout"):
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN source TEXT NOT NULL DEFAULT 'push'")
 
-    for statement in SCHEMA.strip().rstrip(";").split(";"):
+    for statement in (SCHEMA + CLOUD_SCHEMA).strip().rstrip(";").split(";"):
         conn.execute(statement)
     conn.execute(
         """INSERT INTO meta(key, value) VALUES ('schema_version', ?)

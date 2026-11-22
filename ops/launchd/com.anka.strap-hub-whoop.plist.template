@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.anka.strap-hub-whoop</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@UV_BIN@</string>
+        <string>run</string>
+        <string>--no-sync</string>
+        <string>--env-file</string>
+        <string>@ENV_FILE@</string>
+        <string>strap-hub</string>
+        <string>whoop-sync</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>@PROJECT_DIR@</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>StandardOutPath</key>
+    <string>@STATE_DIR@/whoop-sync.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>@STATE_DIR@/whoop-sync.stderr.log</string>
+</dict>
+</plist>

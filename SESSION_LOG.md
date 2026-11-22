@@ -159,3 +159,20 @@
   clients refreshing the same grant invalidate each other. The hub must be the only holder.
 - W6 dispatched to a Sol builder in its own worktree. Journal writes stay out of scope until the
   owner decides on the private-API route.
+
+## 2026-11-22 W6 cloud storage and sync
+
+- Reused the hub's private WAL connection and transactional write helper. Schema
+  v3 adds four WHOOP tables, read projections and sync metadata. Synthetic
+  fixtures cover migration, rescoring, pagination, partial failures and retries.
+- Promoted the locked HTTPX version to a runtime dependency and added OAuthLib
+  for authorization-code and refresh forms. The hub supplies the loopback
+  callback, file lock and atomic token rotation. The maintained MIT
+  `whoop` client adds Requests and Authlib and would still need the hub's
+  persistence and date handling. [HTTPX transports](https://www.python-httpx.org/advanced/transports/)
+  · [OAuthLib](https://github.com/oauthlib/oauthlib)
+  · [Authlib OAuth clients](https://docs.authlib.org/en/stable/oauth2/client/http/index.html)
+  · [WHOOP Python client](https://pypi.org/project/whoop/)
+- Added local auth, sync, status and revoke commands plus the 15-minute
+  LaunchAgent template. The fixture exercises authorization through revocation.
+  Verify dashboard redirect support and first live sync during owner setup.
