@@ -35,7 +35,8 @@ def register(commands: argparse._SubParsersAction) -> None:
     auth = commands.add_parser("whoop-auth", help="authorize the hub with WHOOP")
     auth.add_argument("--paste", action="store_true", help="paste the redirect URL in a hidden prompt")
     poll = commands.add_parser("whoop-sync", help="fetch WHOOP v2 records")
-    poll.add_argument("--since", type=_iso_date, metavar="DATE", help="backfill from this UTC date (YYYY-MM-DD)")
+    poll.add_argument("--since", type=_iso_date, metavar="DATE",
+                      help="backfill and reconcile from this UTC date (YYYY-MM-DD)")
     poll.add_argument("--dry-run", action="store_true", help="print the UTC sync window without contacting WHOOP")
     commands.add_parser("whoop-status", help="show WHOOP token state, last sync and stored row counts")
     commands.add_parser("whoop-revoke", help="revoke the WHOOP grant and remove its local tokens")

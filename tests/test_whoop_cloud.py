@@ -93,13 +93,11 @@ def collections():
     }
 
 
-def transport_for(collections, *, reject=None):
+def transport_for(collections):
     def respond(request):
         assert request.url.host == "api.prod.whoop.com"
         assert request.headers["Authorization"] == "Bearer fixture-access"
         endpoint = request.url.path.removeprefix("/developer/v2")
-        if reject == endpoint:
-            return httpx.Response(403, text="fixture response body")
         return httpx.Response(200, json={"records": collections[endpoint], "next_token": None})
 
     return httpx.MockTransport(respond)
@@ -311,12 +309,63 @@ def test_failed_collection_keeps_rows_and_cursor_untouched(cloud, collections):
     with closing(connect(db_path, read_only=True)) as db:
         previous = dict(db.execute("SELECT key, value FROM meta"))
     collections["/cycle"][0]["step_count"] = 1
-    with httpx.Client(transport=transport_for(collections, reject="/activity/workout")) as http:
+    collections["/activity/sleep"].clear()
+
+    def fail_workout_second_page(request):
+        endpoint = request.url.path.removeprefix("/developer/v2")
+        if endpoint == "/activity/workout":
+            if request.url.params.get("nextToken") == "fixture-next":
+                return httpx.Response(403)
+            return httpx.Response(200, json={"records": [], "next_token": "fixture-next"})
+        return httpx.Response(200, json={"records": collections[endpoint]})
+
+    with httpx.Client(transport=httpx.MockTransport(fail_workout_second_page)) as http:
         with pytest.raises(WhoopError, match="HTTP 403"):
             sync(db_path, OAuth(config, store, http))
     with closing(connect(db_path, read_only=True)) as db:
         assert dict(db.execute("SELECT key, value FROM meta")) == previous
         assert db.execute("SELECT step_count FROM cloud_cycle WHERE id = 1").fetchone()[0] == 8100
+        assert db.execute("SELECT COUNT(*) FROM cloud_sleep").fetchone()[0] == 2
+        assert db.execute("SELECT COUNT(*) FROM cloud_workout").fetchone()[0] == 1
+
+
+def test_sync_removes_missing_rows_in_window_and_backfills_older_deletions(cloud, collections, monkeypatch):
+    from strap_hub.mcp import server
+
+    db_path, store = cloud
+    monkeypatch.setenv("WHOOP_SYNC_WINDOW_DAYS", "3")
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW
+
+    monkeypatch.setattr("strap_hub.whoop_cloud.sync.datetime", FixedClock)
+    old_workout = {
+        **collections["/activity/workout"][0], "id": "00000000-0000-4000-8000-000000000004",
+        "start": "2026-01-05T01:00:00Z", "end": "2026-01-05T02:00:00Z",
+    }
+    collections["/activity/workout"].append(old_workout)
+    with httpx.Client(transport=transport_for(collections)) as http:
+        oauth = OAuth(OAuthConfig("fixture-id", "fixture-secret"), store, http)
+        sync(db_path, oauth, date(2026, 1, 5))
+        assert json.loads(server.sleep_night("2026-01-14"))["totals"]["tst_min"] == 390
+        assert json.loads(server.workouts("2026-01-13", "2026-01-14"))["totals"]["count"] == 1
+        collections["/activity/workout"].clear()
+        collections["/activity/sleep"].pop(0)
+        collections["/recovery"].clear()
+        collections["/cycle"].pop(0)
+        sync(db_path, oauth)
+
+        assert json.loads(server.sleep_night("2026-01-14"))["totals"] == {}
+        assert json.loads(server.workouts("2026-01-13", "2026-01-14"))["workouts"] == []
+        assert len(json.loads(server.workouts("2026-01-04", "2026-01-05"))["workouts"]) == 1
+        with closing(connect(db_path, read_only=True)) as db:
+            assert [r[0] for r in db.execute("SELECT id FROM cloud_sleep")] == [NAP_ID]
+            assert [r[0] for r in db.execute("SELECT id FROM cloud_cycle")] == [2]
+            assert db.execute("SELECT COUNT(*) FROM cloud_recovery").fetchone()[0] == 0
+
+        sync(db_path, oauth, date(2026, 1, 5))
+        assert json.loads(server.workouts("2026-01-04", "2026-01-05"))["workouts"] == []
 
 
 def test_sync_uses_previous_cutoff_through_outages(cloud, monkeypatch):

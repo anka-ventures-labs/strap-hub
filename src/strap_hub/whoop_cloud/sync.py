@@ -1,4 +1,4 @@
-"""Normalize and upsert WHOOP collections as one successful sync."""
+"""Normalize and reconcile WHOOP collections as one successful sync."""
 
 from __future__ import annotations
 
@@ -168,6 +168,22 @@ class SyncWindow:
     advance_cursor: bool
 
 
+def _remove_missing(db: sqlite3.Connection, table: str, rows: list[dict], window: SyncWindow) -> None:
+    identity = "id"
+    start = "start"
+    if table == "cloud_recovery":
+        # The recovery endpoint uses the related sleep's start and supplies no
+        # start of its own. A missing link cannot establish window membership.
+        identity = "cycle_id"
+        start = "(SELECT start FROM cloud_sleep WHERE id = cloud_recovery.sleep_id)"
+    db.execute(
+        f"""DELETE FROM {table}
+            WHERE {start} >= ? AND {start} < ?
+            AND {identity} NOT IN (SELECT value FROM json_each(?))""",
+        (window.start, window.end, json.dumps([row[identity] for row in rows])),
+    )
+
+
 def sync_window(db_path: str, since: date | None = None) -> SyncWindow:
     try:
         days = int(os.environ.get("WHOOP_SYNC_WINDOW_DAYS", "7"))
@@ -219,6 +235,9 @@ def sync(db_path: str, oauth: OAuth, since: date | None = None) -> dict:
                 _set_metadata(db, OWNER, owners.pop())
             for table, rows in batches.items():
                 _upsert(db, table, rows)
+            # Reconcile recoveries while their old sleep rows are still available.
+            for table in ("cloud_recovery", "cloud_sleep", "cloud_cycle", "cloud_workout"):
+                _remove_missing(db, table, batches[table], window)
             _set_metadata(db, LAST_SYNC, completed_at)
             if window.advance_cursor:
                 _set_metadata(db, SYNC_END, window.end)

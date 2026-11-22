@@ -236,9 +236,15 @@ with the cycle date as fallback. If several cycles or main sleeps have the
 same local date, the latest start or wake time wins, respectively.
 
 A successful poll commits all four collections and `meta.whoop_last_sync_at`
-together. `meta.whoop_sync_end` records the UTC cutoff for the next incremental
-window. An explicit backfill starting after the incremental window leaves that
-cutoff in place so the next poll can cover the gap. The store is single-account
+together. Once every page succeeds, the hub removes cloud rows missing from the
+response whose UTC starts are in the window (start inclusive, end exclusive).
+Recovery uses the linked sleep's start. If that start is unavailable, the
+recovery row has no known window membership and is retained. A failed or
+incomplete fetch leaves the records and sync timestamps intact.
+`meta.whoop_sync_end` records the UTC cutoff for the next incremental window.
+An explicit backfill reconciles its entire window. A backfill starting after
+the incremental window leaves the cutoff in place so the next poll can cover
+the gap. The store is single-account
 and uses the collection account identifier to reject data from a different
 account. API profile and body measurement payloads are outside the sync scope.
 Journal, behaviours, ECG and stage segments are outside the official v2 data
