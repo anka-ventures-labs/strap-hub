@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -33,8 +36,8 @@ def cloud(tmp_path, monkeypatch):
     monkeypatch.delenv("HUB_WHOOP_TOKEN_PATH", raising=False)
     monkeypatch.delenv("WHOOP_SYNC_WINDOW_DAYS", raising=False)
     store = TokenStore(token_path(db))
-    with store.locked():
-        store.save(Tokens("fixture-access", "fixture-refresh", time.time() + 3600))
+    with store.locked() as credentials:
+        credentials.save(Tokens("fixture-access", "fixture-refresh", time.time() + 3600))
     return str(db), store
 
 
@@ -124,8 +127,8 @@ def test_authorization_url_and_rejects_callback_with_wrong_or_duplicate_state():
 
 def test_refresh_rotates_both_tokens_once_under_contention(cloud):
     _, store = cloud
-    with store.locked():
-        store.save(Tokens("fixture-old-access", "fixture-old-refresh", time.time() - 10))
+    with store.locked() as credentials:
+        credentials.save(Tokens("fixture-old-access", "fixture-old-refresh", time.time() - 10))
     first_refresh = Event()
     second_attempt = Event()
     calls = []
@@ -145,7 +148,7 @@ def test_refresh_rotates_both_tokens_once_under_contention(cloud):
     def use_token(oauth):
         with oauth.session() as session:
             result = session.access_token()
-            assert store.load().refresh_token == "fixture-new-refresh"
+            assert session.credentials.load().refresh_token == "fixture-new-refresh"
             return result
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as http, ThreadPoolExecutor(2) as workers:
@@ -163,7 +166,86 @@ def test_refresh_rotates_both_tokens_once_under_contention(cloud):
     assert len(calls) == 1
     assert store.path.stat().st_mode & 0o777 == 0o600
     assert store.path.with_suffix(".json.lock").stat().st_mode & 0o777 == 0o600
-    assert list(store.path.parent.glob(".whoop-*")) == []
+    assert not store.path.with_suffix(".json.staged").exists()
+    assert not store.path.with_suffix(".json.promote").exists()
+
+
+@pytest.mark.parametrize("operation", ["rename", "directory_sync"])
+def test_failed_token_promotion_recovers_rotated_pair_in_next_process(cloud, monkeypatch, operation):
+    _, store = cloud
+    with store.locked() as credentials:
+        credentials.save(Tokens("fixture-old-access", "fixture-old-refresh", time.time() - 10))
+
+    def respond(request):
+        assert parse_qs(request.content.decode())["refresh_token"] == ["fixture-old-refresh"]
+        return httpx.Response(200, json={"access_token": "fixture-new-access", "refresh_token": "fixture-new-refresh",
+                                        "expires_in": 3600})
+
+    replace = os.replace
+    fsync = os.fsync
+    replaced = False
+
+    def replace_token(*args, **kwargs):
+        nonlocal replaced
+        if operation == "rename":
+            raise OSError("fixture could not rename")
+        replace(*args, **kwargs)
+        replaced = True
+
+    def sync_token(fd):
+        if replaced:
+            raise OSError("fixture could not sync directory")
+        fsync(fd)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        oauth = OAuth(OAuthConfig("fixture-id", "fixture-secret"), store, http)
+        with monkeypatch.context() as patch:
+            patch.setattr("strap_hub.whoop_cloud.oauth.os.replace", replace_token)
+            patch.setattr("strap_hub.whoop_cloud.oauth.os.fsync", sync_token)
+            with pytest.raises(OSError, match="fixture could not"):
+                with oauth.session() as session:
+                    session.access_token()
+    staging = store.path.with_suffix(".json.staged")
+    assert staging.stat().st_mode & 0o777 == 0o600
+
+    subprocess.run([sys.executable, "-c", """
+import sys
+from pathlib import Path
+import httpx
+from strap_hub.whoop_cloud.oauth import OAuth, OAuthConfig, TokenStore
+
+def unexpected_request(request):
+    raise AssertionError("Recovery should reuse the rotated pair without refreshing")
+
+store = TokenStore(Path(sys.argv[1]))
+with httpx.Client(transport=httpx.MockTransport(unexpected_request)) as http:
+    with OAuth(OAuthConfig("fixture-id", "fixture-secret"), store, http).session() as session:
+        assert session.access_token() == "fixture-new-access"
+        assert session.tokens.refresh_token == "fixture-new-refresh"
+""", str(store.path)], check=True, timeout=10)
+    assert not staging.exists()
+    assert not store.path.with_suffix(".json.promote").exists()
+    assert json.loads(store.path.read_text())["refresh_token"] == "fixture-new-refresh"
+
+
+def test_credentials_require_a_trusted_directory(tmp_path):
+    parent = tmp_path / "shared"
+    store = TokenStore(parent / "private" / "token.json")
+    with store.locked() as credentials:
+        assert credentials.load() is None
+    assert store.path.parent.stat().st_mode & 0o777 == 0o700
+
+    store.path.parent.chmod(0o770)
+    with pytest.raises(WhoopError, match="not group/world writable"):
+        with store.locked():
+            pytest.fail("Opened an unsafe credential directory")
+    assert store.status()["token_state"] == "unreadable"
+
+    store.path.parent.chmod(0o700)
+    parent.chmod(0o777)
+    with pytest.raises(WhoopError, match="unsafe parent"):
+        with store.locked():
+            pytest.fail("A writable parent could swap the credential directory")
 
 
 def test_pagination_and_rate_limit_backoff(cloud, monkeypatch):

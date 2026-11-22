@@ -156,9 +156,15 @@ retry returns the same acceptance response and keeps the original receipt time.
 
    Set `HUB_WHOOP_TOKEN_PATH` if you need a different private location outside the
    checkout. The default adds `.whoop-token.json` to `HUB_DB_PATH`. The rotating
-   token file and its sibling lock file are owner-only (mode 600). Keep the lock
-   file in place while the app is configured. If a refresh reaches WHOOP but its
-   replacement token cannot be saved locally, authorize again.
+   token file, lock and any staging files are owner-only (mode 600). Their
+   directory must belong to the service user and disallow group and world writes.
+   The CLI creates a missing directory with mode 700 and refuses parent paths
+   where another user could replace it. Keep the lock file in place while the
+   app is configured. If token promotion fails after a refresh, fix the
+   filesystem issue and run the sync again. It recovers a saved token pair from
+   staging before making a request. If WHOOP rotated the pair and no valid
+   replacement reached disk, stop the sync job and authorize again after
+   clearing any incomplete staging file.
 3. From the hub checkout, run authorization once. Open the printed URL in a
    browser and grant access. For an HTTPS or `whoop://` redirect, paste the
    complete redirected URL at the hidden prompt, even if the browser reports a
