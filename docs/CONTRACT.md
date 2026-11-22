@@ -184,26 +184,31 @@ Range rows identify their own source. Raw provider records stay in the database.
 |---|---|---|
 | `data_freshness` | — | last digest and band record times, newest day with data, count of distinct stored dates, `cloud_last_sync_at`, local `token_state` and `token_expires_at` |
 | `sleep_summary` | `days` (1–90, default 7) | per night: total, deep, REM, light minutes, efficiency, HRV, RHR, resp rate; plus averages and the change vs the previous equal period |
-| `sleep_night` | `date` | stage totals, merged timeline and wake count for band sleep, or score state and disturbance count for cloud sleep |
+| `sleep_night` | `date` | stage totals, band timeline and wake count when available, WHOOP score state and disturbance count when available |
 | `workouts` | `from`, `to` (default: this week, Monday to today), `limit` (1–100, default 50), `cursor` (opaque, optional) | up to `limit` workouts (date, type, duration, strain, calories, max HR, zone minutes), newest first; `next_cursor` when more remain; `totals` always cover the whole requested range |
 | `readiness_today` | — | today's (or latest) readiness, HRV and RHR, each vs its 30-day baseline (the 30 calendar days before the reported day), strain yesterday |
-| `metric_trend` | `key`, `days` (1–365, default 30) | daily values for one metric key, plus mean, min, max. Known keys are rounded for display; unknown keys keep stored precision |
+| `metric_trend` | `key`, `days` (1–365, default 30) | daily values for one metric key, plus mean, min, max. Established band keys keep their display rounding. For added cloud keys, band values and statistics that include band samples keep full precision |
 | `strain_day` | `date` | strain, `kilojoule`, `avg_hr`, `max_hr`, `steps`, and cloud cycle score state when available |
 | `sleep_detail` | `date` | `sleep`, `recovery`, and `naps` with source labels. Cloud sleep includes stage minutes, four `sleep_need_min` components, performance, consistency, efficiency, and respiratory rate. Cloud recovery includes readiness, RMSSD, resting HR, SpO₂, skin temperature, and calibration where recorded |
 
 Cloud values take precedence for matching dates and metric keys. Missing values
-fall back to recorded band metrics. A date with any cloud workout uses the cloud
-workout list for that day, so overlapping provider and band sessions appear once.
+fall back to recorded band metrics. Workouts match by UTC time, using starts
+within two minutes when the sessions overlap or an end time is unknown. Longer
+start differences can match when overlap covers at least half of the longer
+session. Each cloud workout replaces at most one band workout, chosen by nearest
+start. Other band workouts keep their own dates and sources.
 Cloud workout totals convert kilojoules to kcal at 4.184 kJ per kcal. When only
 band total kcal exists, `strain_day` uses that conversion for kilojoules.
 
-Cloud main sleep supplies the stage totals in `sleep_night`, with `segments: []`
-and `wake_count: null`. `disturbance_count` carries the WHOOP count when available.
-`sleep_detail` selects main sleep and recovery independently and includes
-cloud naps separately with `nap: true`. A missing record uses the available band
-record for that component. Band fallback for individual metrics on a cloud day
-is identified by `band_keys`. Period averages and baselines can include both
-sources. A range with no matching data returns an empty list with freshness.
+For sleep and recovery, values from `SCORED` WHOOP records take precedence
+field by field. Band data fills missing values and supplies the timeline and
+wake count when available. The WHOOP `score_state` remains present even when
+all values come from the band. In mixed sleep or recovery sections, `band_keys`
+identifies the fields supplied by the band, including keys inside `totals`.
+`disturbance_count` carries the WHOOP count when available.
+`sleep_detail` selects main sleep and recovery independently and lists cloud
+naps separately with `nap: true`. Period averages and baselines can include
+both sources. A range with no matching data returns an empty list with freshness.
 
 `token_state` values are `missing`, `unreadable`, `expired`, and `ready`. They reflect
 the local file and access-token expiry. Access is confirmed when a sync succeeds.
@@ -212,8 +217,9 @@ the local file and access-token expiry. Access is confirmed when a sync succeeds
 ## 6. WHOOP Developer API v2
 
 The cloud sync reads the cycle, recovery, sleep, and workout collections into
-their own schema v3 tables. The phone and backup write paths continue to apply
-section 3 to the band tables.
+their own schema v3 tables. Edge workout privacy tombstones apply only to band
+records. Marking a workout private in the phone app leaves the separate WHOOP
+copy visible. Delete or hide that copy in WHOOP if needed.
 
 | Table | Key | Stored fields |
 |---|---|---|

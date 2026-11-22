@@ -190,6 +190,10 @@ retry returns the same acceptance response and keeps the original receipt time.
    Use `whoop-sync --since YYYY-MM-DD` to backfill and reconcile older deletions
    from midnight UTC on that date. Add `--dry-run` to print the planned window
    without contacting WHOOP or changing the database or tokens.
+
+   Marking a workout private in the phone app only affects the band's copy.
+   Delete or hide the separate cloud copy in WHOOP if needed. A successful
+   sync covering its start removes it from the hub once WHOOP stops returning it.
 4. Install `ops/launchd/com.anka.strap-hub-whoop.plist.template` as a LaunchAgent
    using the same placeholders and login-session procedure as the digest
    service. Use the filename `com.anka.strap-hub-whoop.plist` and the label

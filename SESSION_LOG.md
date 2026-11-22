@@ -204,3 +204,11 @@
   reconciles older records. Recovery uses the related sleep start when present.
 - Six focused Python 3.14 sync checks passed, including deletion visibility,
   backfill of older deletions, and preservation after a second-page failure.
+- MCP matches cloud and band workouts by UTC session time and preserves
+  unmatched sessions in the list and its totals. Sleep and recovery fill
+  missing cloud scores from band fields and preserve the WHOOP score state.
+  Trend rounding preserves band precision for newly added cloud keys.
+- The contract and operator instructions explain that phone privacy settings
+  apply to band records. Manage the separate cloud copy in WHOOP.
+- Full locked pytest suites passed offline on Python 3.14.9 (94 tests,
+  2.28 s) and Python 3.12.14 (94 tests, 4.14 s).

@@ -23,6 +23,10 @@ SLEEP_NEED = {
     "recent_strain": "need_from_recent_strain_milli",
     "recent_nap": "need_from_recent_nap_milli",
 }
+SLEEP_SCORE_FIELDS = (
+    "disturbance_count", "sleep_cycle_count", "sleep_performance_percentage",
+    "sleep_consistency_percentage", "sleep_efficiency_percentage", "respiratory_rate",
+)
 RECOVERY = {
     "readiness": "recovery_score",
     "rmssd": "hrv_rmssd_milli",
@@ -52,18 +56,14 @@ def minutes(row: sqlite3.Row, columns: dict[str, str]) -> dict[str, int]:
 
 
 def sleep_record(row: sqlite3.Row) -> dict:
+    scored = row["score_state"] == "SCORED"
     return {
         "source": "whoop_cloud",
         "start": row["start"],
         "end": row["end"],
         "nap": bool(row["nap"]),
         "score_state": row["score_state"],
-        "totals": minutes(row, SLEEP_TOTALS),
-        "sleep_need_min": minutes(row, SLEEP_NEED),
-        **{
-            key: row[key] for key in (
-                "disturbance_count", "sleep_cycle_count", "sleep_performance_percentage",
-                "sleep_consistency_percentage", "sleep_efficiency_percentage", "respiratory_rate",
-            ) if row[key] is not None
-        },
+        "totals": minutes(row, SLEEP_TOTALS) if scored else {},
+        "sleep_need_min": minutes(row, SLEEP_NEED) if scored else {},
+        **({key: row[key] for key in SLEEP_SCORE_FIELDS if row[key] is not None} if scored else {}),
     }
