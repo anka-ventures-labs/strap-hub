@@ -6,6 +6,9 @@ data/
 *.db-*
 *.db.gz
 *.sqlite
+*.whoop-token.json
+*.whoop-token.json.lock
+.whoop-*
 local/
 # Python
 __pycache__/

@@ -13,6 +13,7 @@ def test_store_creates_schema_with_private_mode(tmp_path):
     conn = connect(db)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"day_metric", "sleep_segment", "workout", "workout_tombstone", "digest_log", "meta"} <= tables
+    assert {"cloud_cycle", "cloud_recovery", "cloud_sleep", "cloud_workout"} <= tables
     assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
     assert stat.S_IMODE(os.stat(db).st_mode) == 0o600
 
@@ -91,10 +92,35 @@ def test_migrates_v1_rows_and_preserves_metadata(tmp_path):
     for _ in range(2):
         with closing(connect(path)) as db:
             assert dict(db.execute("SELECT key, value FROM meta")) == {
-                "schema_version": "2", "empty_night:2026-01-03": "125",
+                "schema_version": "3", "empty_night:2026-01-03": "125",
             }
             assert tuple(db.execute("SELECT value, source FROM day_metric").fetchone()) == (53, "push")
             assert tuple(db.execute("SELECT stage, source FROM sleep_segment").fetchone()) == ("rem", "push")
             assert tuple(db.execute("SELECT id, source FROM workout").fetchone()) == ("synthetic", "push")
             assert db.execute("SELECT id FROM workout_tombstone").fetchall() == []
     assert path.stat().st_ino == inode
+
+
+def test_v2_database_migrates_to_v3_without_rewriting_band_rows(tmp_path):
+    from strap_hub.store.db import SCHEMA
+
+    path = tmp_path / "hub.db"
+    with closing(sqlite3.connect(path)) as legacy, legacy:
+        legacy.executescript(SCHEMA)
+        legacy.executescript("""
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta VALUES ('schema_version', '2'), ('max_push_seq', '42');
+            INSERT INTO workout_tombstone VALUES ('synthetic', '2026-01-01T00:00:00Z', 'push', 42);
+        """)
+        legacy.execute("INSERT INTO day_metric VALUES ('2026-01-01', 'rhr', 52, 125, "
+                       "'2026-01-01T00:00:00Z', 'import')")
+    inode = path.stat().st_ino
+    path.chmod(0o644)
+    with closing(connect(path)) as db:
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert dict(db.execute("SELECT key, value FROM meta")) == {"schema_version": "3", "max_push_seq": "42"}
+        assert tuple(db.execute("SELECT source, seq_floor FROM workout_tombstone").fetchone()) == ("push", 42)
+        assert db.execute("SELECT * FROM cloud_cycle").fetchall() == []
+        assert tuple(db.execute("SELECT value, algo_version, source FROM day_metric").fetchone()) == (52, 125, "import")
+    assert path.stat().st_ino == inode
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600

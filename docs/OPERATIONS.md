@@ -136,3 +136,61 @@ later phone push that includes the workout can restore it.
 Imports record their receipt time in `digest_log`. A phone push supplies its
 band's freshness timestamp. The hub logs each distinct push once. An identical
 retry returns the same acceptance response and keeps the original receipt time.
+
+## Sync WHOOP cloud data
+
+1. Create or open a dedicated app in the WHOOP Developer Dashboard. Enable
+   `read:recovery`, `read:cycles`, `read:workout`, `read:sleep`, `read:profile`,
+   `read:body_measurement`, and `offline`. Register the exact redirect URL.
+   Retire any other client using the same app, including a Home Assistant WHOOP
+   integration. Each refresh rotates both tokens, so the hub must be the
+   sole holder. [WHOOP OAuth documentation](https://developer.whoop.com/docs/developing/oauth/)
+2. Add these settings to the hub's private `.env`. Keep client credentials out of Git.
+
+   ```dotenv
+   WHOOP_CLIENT_ID=<app client ID>
+   WHOOP_CLIENT_SECRET=<app client secret>
+   WHOOP_REDIRECT_URI=https://localhost:8771/whoop/callback
+   WHOOP_SYNC_WINDOW_DAYS=7
+   ```
+
+   Set `HUB_WHOOP_TOKEN_PATH` if you need a different private location outside the
+   checkout. The default adds `.whoop-token.json` to `HUB_DB_PATH`. The rotating
+   token file and its sibling lock file are owner-only (mode 600). Keep the lock
+   file in place while the app is configured. If a refresh reaches WHOOP but its
+   replacement token cannot be saved locally, authorize again.
+3. From the hub checkout, run authorization once. Open the printed URL in a
+   browser and grant access. For an HTTPS or `whoop://` redirect, paste the
+   complete redirected URL at the hidden prompt, even if the browser reports a
+   connection error. The auth command defaults to
+   `http://localhost:8771/whoop/callback` and listens on `127.0.0.1` for up to three
+   minutes if you register a plain HTTP loopback URL. WHOOP documents HTTPS and
+   `whoop://` redirect schemes. Use the HTTPS setup shown above if the dashboard
+   rejects plain HTTP. `--paste` also works for a registered loopback URL when
+   the listener cannot receive the response.
+
+   ```sh
+   uv run --no-sync --env-file "$HUB_ENV_FILE" strap-hub whoop-auth --paste
+   uv run --no-sync --env-file "$HUB_ENV_FILE" strap-hub whoop-sync
+   uv run --no-sync --env-file "$HUB_ENV_FILE" strap-hub whoop-status
+   ```
+
+   Set `HUB_ENV_FILE` to the absolute path of the private config file from the
+   install step. `whoop-status` reports local token state, expiry, last successful
+   sync, and stored row counts. The first sync loads the trailing window. Later
+   polls overlap the last successful cutoff by `WHOOP_SYNC_WINDOW_DAYS`, including
+   any time the job was offline. Use `--since YYYY-MM-DD` to backfill from that
+   date at midnight UTC. Add `--dry-run` to print the planned window without
+   contacting WHOOP or changing the database or tokens.
+4. Install `ops/launchd/com.anka.strap-hub-whoop.plist.template` as a LaunchAgent
+   using the same placeholders and login-session procedure as the digest
+   service. Use the filename `com.anka.strap-hub-whoop.plist` and the label
+   `com.anka.strap-hub-whoop`. The job runs at load and every 15 minutes with
+   umask 077. Its logs are `whoop-sync.stdout.log` and `whoop-sync.stderr.log` in the
+   private state directory. The sync retries transient reads with backoff. A
+   rate-limit reset of more than 60 seconds ends the run; retry after the reset
+   or let the scheduled job resume.
+5. To disconnect, unload the sync LaunchAgent, then run
+   `uv run --no-sync --env-file "$HUB_ENV_FILE" strap-hub whoop-revoke`.
+   After WHOOP confirms revocation, the CLI removes the local token file.
+   Previously synced rows stay in the hub for historical queries.

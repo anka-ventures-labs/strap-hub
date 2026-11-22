@@ -123,8 +123,9 @@ Every stored day metric, night and workout records its `source` (`push` or `impo
 The database and its `-wal` and `-shm` files must be mode 600 at all times. On every
 writable open the hub sets them to 600 (including a pre-existing or restored store)
 and refuses to write if it cannot. The hub process runs with `umask 077`.
-Schema v1 stores are migrated in place to v2 (new columns default to `push`, new
-tombstone table).
+Writable opens migrate schema v1 and v2 stores in place to v3. The v1 migration
+adds source columns defaulted to `push` and the tombstone table. The v3 migration
+adds the WHOOP tables and read views described in section 6.
 
 ```sql
 CREATE TABLE day_metric (date TEXT NOT NULL, key TEXT NOT NULL, value REAL NOT NULL,
@@ -143,7 +144,7 @@ CREATE TABLE workout_tombstone (id TEXT PRIMARY KEY, revoked_at TEXT NOT NULL,
 CREATE TABLE digest_log (id INTEGER PRIMARY KEY, received_at TEXT NOT NULL,
   sent_at TEXT, app_version TEXT, algo_version INTEGER, last_band_record_at TEXT,
   days INTEGER, nights INTEGER, workouts INTEGER, source TEXT NOT NULL);  -- 'push' | 'import'
-CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);  -- schema_version = 2
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);  -- schema_version = 3
 ```
 
 `workout.date` is the local day of `start`, taken from the phone (W3 sends it as part
@@ -187,3 +188,39 @@ fresh the data is. Results stay small: no raw per-second data.
 | `metric_trend` | `key`, `days` (1–365, default 30) | daily values for one `day_metric` key, plus mean, min, max. Known keys are rounded for display; unknown keys keep stored precision |
 
 Errors are explicit: no data in range returns an empty list with `as_of`, never a guess.
+
+
+## 6. WHOOP Developer API v2
+
+The cloud sync reads the cycle, recovery, sleep, and workout collections into
+their own schema v3 tables. The phone and backup write paths continue to apply
+section 3 to the band tables.
+
+| Table | Key | Stored fields |
+|---|---|---|
+| `cloud_cycle` | WHOOP integer `id` | Local date, start/end, offset, score state, nullable `step_count`, strain, kilojoules, average and maximum HR. |
+| `cloud_recovery` | Integer `cycle_id` | Sleep UUID, score state, recovery score, resting HR, RMSSD in ms, SpO₂ percent, skin temperature in °C, calibration flag. |
+| `cloud_sleep` | Sleep UUID `id` | Wake date, start/end, offset, nap flag, score state, stage and need durations in ms, cycle and disturbance counts, respiratory rate and sleep performance, consistency and efficiency percentages. |
+| `cloud_workout` | Workout UUID `id` | Local date, start/end, offset, sport fields, score state, strain, HR, kilojoules, percent recorded, distance and altitude in meters, zone zero through five durations in ms. |
+
+All four tables have typed nullable score columns, `raw_json` and `updated_at`.
+WHOOP's update time takes precedence over the first time the hub observes the
+payload. Upserts are keyed by WHOOP ID and an identical payload leaves the row
+unchanged. Pending and unscorable records retain their metadata with empty score
+columns and the score omitted from the raw JSON. Cycle steps are top-level
+data and stay nullable independently of score state.
+
+The local date of a cycle or workout is its start adjusted by WHOOP's
+`timezone_offset`. A sleep record uses its adjusted end (wake day) and has a
+null date while no end is present. Recovery follows the linked sleep wake day,
+with the cycle date as fallback. If several cycles or main sleeps have the
+same local date, the latest start or wake time wins, respectively.
+
+A successful poll commits all four collections and `meta.whoop_last_sync_at`
+together. `meta.whoop_sync_end` records the UTC cutoff for the next incremental
+window. An explicit backfill starting after the incremental window leaves that
+cutoff in place so the next poll can cover the gap. The store is single-account
+and uses the collection account identifier to reject data from a different
+account. API profile and body measurement payloads are outside the sync scope.
+Journal, behaviours, ECG and stage segments are outside the official v2 data
+available to this integration. See the [WHOOP API reference](https://developer.whoop.com/api/).
